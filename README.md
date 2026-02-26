@@ -34,6 +34,23 @@ The project uses multiple specialized AI agents to discover data sources and bui
 - Player DOB not available from public APIs
 - Some endpoints require authentication
 
+## Next.js Port
+
+A new dashboard app now exists in [`web/`](web/README.md) with:
+- UI controls to run TTBL and WTT scrapes
+- Legacy season scraping support
+- Player registry dedupe + merge candidate tracking
+- Clean full-history scrape that rebuilds from scratch
+- Data written only to `web/data` (no dependency on `TTBL/` or `ITTF/` folders)
+- Endpoint explorer and data file location panels
+
+Run:
+```bash
+cd web
+npm install
+npm run dev
+```
+
 ## Scrapers Overview
 
 ### master_scrape.py - Master Match + Player Dataset
