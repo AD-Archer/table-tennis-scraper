@@ -8,6 +8,7 @@ export interface TTBLGameRecord {
   gameday: string;
   timestamp: number;
   gameIndex: number;
+  format?: "singles" | "doubles";
   gameState: string;
   winnerSide: "Home" | "Away" | null;
   homePlayer: TTBLPlayerRef;
@@ -67,6 +68,15 @@ export interface WTTPlayer {
   dob: string | null;
   nationality: string | null;
   team: string | null;
+  country_name: string | null;
+  organization_name: string | null;
+  gender: "M" | "W" | "mixed" | "unknown" | null;
+  age: number | null;
+  handedness: string | null;
+  style: string | null;
+  world_ranking: number | null;
+  world_ranking_points: number | null;
+  headshot_url: string | null;
   stats: {
     matches_played: number;
     wins: number;
@@ -179,4 +189,112 @@ export interface PlayerRegistrySnapshot {
 
 export interface PlayerRegistryManualConfig {
   aliases: Record<string, string>;
+}
+
+export type PlayerGender = "M" | "W" | "mixed" | "unknown";
+export type PlayerGenderSource =
+  | "wtt_event_inference"
+  | "wtt_profile_gender"
+  | "ttbl_default_assumption"
+  | "unknown";
+export type PlayerCountrySource =
+  | "wtt_profile_nationality"
+  | "ttbl_profile_nationality"
+  | "unknown";
+
+export interface PlayerSlugMatchEntry {
+  source: "ttbl" | "wtt";
+  matchId: string;
+  occurredAt: string | null;
+  seasonOrYear: string | null;
+  event: string | null;
+  opponent: string | null;
+  opponentSourceId: string | null;
+  score: string | null;
+  outcome: "W" | "L" | null;
+}
+
+export interface PlayerSlugCandidateEntry {
+  otherCanonicalKey: string;
+  otherName: string;
+  reason: string;
+}
+
+export interface PlayerSlugRow {
+  slug: string;
+  canonicalKey: string;
+  displayName: string;
+  sourceCount: number;
+  memberCount: number;
+  sources: Array<"ttbl" | "wtt">;
+  sourceIds: string[];
+  seasons: string[];
+  country: string | null;
+  countrySource: PlayerCountrySource;
+  gender: PlayerGender;
+  genderSource: PlayerGenderSource;
+  matchesPlayed: number;
+  wins: number;
+  losses: number;
+  winRate: number | null;
+  mergeCandidates: PlayerSlugCandidateEntry[];
+  recentMatches: PlayerSlugMatchEntry[];
+}
+
+export interface PlayerSlugOverview {
+  generatedAt: string;
+  totals: {
+    players: number;
+    withMergeCandidates: number;
+    withKnownGender: number;
+  };
+  players: PlayerSlugRow[];
+}
+
+export interface TTBLPlayerProfile {
+  sourcePlayerId: string;
+  stablePlayerId: string | null;
+  seasonPlayerId: string | null;
+  fetchedAt: string;
+  fullName: string;
+  firstName: string | null;
+  lastName: string | null;
+  nationality: string | null;
+  nationalitySecondary: string | null;
+  birthdayUnix: number | null;
+  heightCm: number | null;
+  weightKg: number | null;
+  hand: string | null;
+  racketPosture: string | null;
+  role: string | null;
+  currentClub: string | null;
+  outfitter: string | null;
+  outfitterWebsite: string | null;
+  seasonLabel: string | null;
+  imageUrl: string | null;
+  actionImageUrl: string | null;
+  cardImageUrl: string | null;
+  social: {
+    instagram: string | null;
+    youtube: string | null;
+    website: string | null;
+    tiktok: string | null;
+    facebook: string | null;
+  };
+  metrics: {
+    ttblRank: number | null;
+    worldRank: number | null;
+    qttrValue: number | null;
+    gameWins: number | null;
+    gameLosses: number | null;
+    setWins: number | null;
+    setLosses: number | null;
+    ballWins: number | null;
+    ballLosses: number | null;
+  };
+  sampleSize: {
+    games: number;
+    homeGames: number;
+    awayGames: number;
+  };
 }

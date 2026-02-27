@@ -2,13 +2,19 @@ import { randomUUID } from "node:crypto";
 import { ensureDir, removeDir } from "@/lib/fs";
 import { DATA_ROOT, toProjectRelative } from "@/lib/paths";
 import { getManualMergeFilePath, rebuildPlayerRegistry } from "@/lib/players/registry";
-import { scrapeTTBLLegacySeasons, scrapeTTBLSeason } from "@/lib/scrapers/ttbl";
-import { scrapeWTTMatches } from "@/lib/scrapers/wtt";
+import {
+  scrapeTTBLAllTime,
+  scrapeTTBLLegacySeasons,
+  scrapeTTBLSeason,
+} from "@/lib/scrapers/ttbl";
+import { scrapeWTTAllTime, scrapeWTTMatches } from "@/lib/scrapers/wtt";
 
 export type ActionJobType =
   | "ttbl"
   | "ttbl-legacy"
+  | "ttbl-all-time"
   | "wtt"
+  | "wtt-all-time"
   | "players-registry"
   | "destroy-data";
 export type ActionJobState = "queued" | "running" | "completed" | "failed";
@@ -38,17 +44,44 @@ export interface StartTTBLLegacyActionJobOptions {
   delayMs?: number;
 }
 
+export interface StartTTBLAllTimeActionJobOptions {
+  startYear?: number;
+  endYear?: number;
+  numGamedays?: number;
+  delayMs?: number;
+}
+
 export interface StartWTTActionJobOptions {
   years?: number[];
   pageSize?: number;
   maxPages?: number;
   delayMs?: number;
+  tournamentScope?: "wtt_only" | "all";
+  eventScope?: "singles_only" | "all";
+  includeYouth?: boolean;
+  profileEnrichMaxPlayers?: number;
+  profileEnrichMinMatches?: number;
+}
+
+export interface StartWTTAllTimeActionJobOptions {
+  startYear?: number;
+  endYear?: number;
+  pageSize?: number;
+  maxPages?: number;
+  delayMs?: number;
+  tournamentScope?: "wtt_only" | "all";
+  eventScope?: "singles_only" | "all";
+  includeYouth?: boolean;
+  profileEnrichMaxPlayers?: number;
+  profileEnrichMinMatches?: number;
 }
 
 type ActionJobOptionsByType = {
   ttbl: StartTTBLActionJobOptions;
   "ttbl-legacy": StartTTBLLegacyActionJobOptions;
+  "ttbl-all-time": StartTTBLAllTimeActionJobOptions;
   wtt: StartWTTActionJobOptions;
+  "wtt-all-time": StartWTTAllTimeActionJobOptions;
   "players-registry": Record<string, never>;
   "destroy-data": Record<string, never>;
 };
@@ -172,21 +205,66 @@ async function runActionJob<T extends ActionJobType>(
       emit(status, "API", "Rebuilding player registry after TTBL scrape.");
       const players = await rebuildPlayerRegistry((message) => appendLog(status, message));
       status.result = { result, players };
+    } else if (status.type === "ttbl-all-time") {
+      const opts = options as ActionJobOptionsByType["ttbl-all-time"];
+      emit(
+        status,
+        "API",
+        `Starting TTBL all-time scrape (range=${opts.startYear ?? "default"}-${opts.endYear ?? "default"}, gamedays=${opts.numGamedays ?? "auto"}).`,
+      );
+      const result = await scrapeTTBLAllTime({
+        startYear: opts.startYear,
+        endYear: opts.endYear,
+        numGamedays: opts.numGamedays,
+        delayMs: opts.delayMs,
+        onLog: (message) => appendLog(status, message),
+      });
+      emit(status, "API", "Rebuilding player registry after TTBL all-time scrape.");
+      const players = await rebuildPlayerRegistry((message) => appendLog(status, message));
+      status.result = { result, players };
     } else if (status.type === "wtt") {
       const opts = options as ActionJobOptionsByType["wtt"];
       emit(
         status,
         "API",
-        `Starting WTT scrape (years=${opts.years?.join(",") || "default"}, pageSize=${opts.pageSize ?? "default"}, maxPages=${opts.maxPages ?? "default"}).`,
+        `Starting WTT scrape (years=${opts.years?.join(",") || "default"}, pageSize=${opts.pageSize ?? "default"}, maxPages=${opts.maxPages ?? "default"}, tournamentScope=${opts.tournamentScope ?? "wtt_only"}, eventScope=${opts.eventScope ?? "singles_only"}, includeYouth=${opts.includeYouth ?? false}).`,
       );
       const result = await scrapeWTTMatches({
         years: opts.years,
         pageSize: opts.pageSize,
         maxPages: opts.maxPages,
         delayMs: opts.delayMs,
+        tournamentScope: opts.tournamentScope,
+        eventScope: opts.eventScope,
+        includeYouth: opts.includeYouth,
+        profileEnrichMaxPlayers: opts.profileEnrichMaxPlayers,
+        profileEnrichMinMatches: opts.profileEnrichMinMatches,
         onLog: (message) => appendLog(status, message),
       });
       emit(status, "API", "Rebuilding player registry after WTT scrape.");
+      const players = await rebuildPlayerRegistry((message) => appendLog(status, message));
+      status.result = { result, players };
+    } else if (status.type === "wtt-all-time") {
+      const opts = options as ActionJobOptionsByType["wtt-all-time"];
+      emit(
+        status,
+        "API",
+        `Starting WTT all-time scrape (range=${opts.startYear ?? "default"}-${opts.endYear ?? "default"}, pageSize=${opts.pageSize ?? "default"}, maxPages=${opts.maxPages ?? "default"}, tournamentScope=${opts.tournamentScope ?? "all"}, eventScope=${opts.eventScope ?? "singles_only"}, includeYouth=${opts.includeYouth ?? false}).`,
+      );
+      const result = await scrapeWTTAllTime({
+        startYear: opts.startYear,
+        endYear: opts.endYear,
+        pageSize: opts.pageSize,
+        maxPages: opts.maxPages,
+        delayMs: opts.delayMs,
+        tournamentScope: opts.tournamentScope,
+        eventScope: opts.eventScope,
+        includeYouth: opts.includeYouth,
+        profileEnrichMaxPlayers: opts.profileEnrichMaxPlayers,
+        profileEnrichMinMatches: opts.profileEnrichMinMatches,
+        onLog: (message) => appendLog(status, message),
+      });
+      emit(status, "API", "Rebuilding player registry after WTT all-time scrape.");
       const players = await rebuildPlayerRegistry((message) => appendLog(status, message));
       status.result = { result, players };
     } else if (status.type === "players-registry") {

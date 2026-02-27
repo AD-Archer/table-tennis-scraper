@@ -1,6 +1,7 @@
 import path from "node:path";
-import { ensureDir, sleep, writeJson, writeText } from "@/lib/fs";
+import { ensureDir, readJson, sleep, writeJson, writeText } from "@/lib/fs";
 import { TTBL_LEGACY_INDEX_FILE, TTBL_OUTPUT_DIR, TTBL_SEASONS_DIR } from "@/lib/paths";
+import { hydrateTTBLPlayerProfiles } from "@/lib/ttbl/player-profiles";
 import {
   TTBLLegacyIndex,
   TTBLLegacyIndexRow,
@@ -79,6 +80,10 @@ interface TTBLRawPlayer {
   imageUrl?: string;
 }
 
+interface TTBLRawDouble {
+  id?: string;
+}
+
 interface TTBLRawGame {
   index?: number;
   gameState?: string;
@@ -87,6 +92,8 @@ interface TTBLRawGame {
   awayPlayer?: TTBLRawPlayer | null;
   homeLeaguePlayer?: TTBLRawPlayer | null;
   awayLeaguePlayer?: TTBLRawPlayer | null;
+  homeDouble?: TTBLRawDouble | null;
+  awayDouble?: TTBLRawDouble | null;
 }
 
 interface TTBLRawMatch {
@@ -132,6 +139,10 @@ function nameFromRawPlayer(player?: TTBLRawPlayer | null): string {
 
   const full = `${player.firstName ?? ""} ${player.lastName ?? ""}`.trim();
   return full || "Unknown";
+}
+
+function isTTBLSinglesGame(game: TTBLRawGame): boolean {
+  return !game.homeDouble && !game.awayDouble;
 }
 
 function getScheduleUrl(season: string, gameday: number): string {
@@ -373,6 +384,7 @@ export async function scrapeTTBLSeason(
   let writtenRawMatches = 0;
   let processedMatchPayloads = 0;
   let rejectedOutOfSeason = 0;
+  let rejectedDoublesGames = 0;
   const acceptedMatchIds: string[] = [];
 
   for (const matchId of allMatchIds) {
@@ -399,8 +411,10 @@ export async function scrapeTTBLSeason(
       const gameday = rawMatch.gameday?.name ?? "Unknown";
       const timestamp = rawMatch.timeStamp ?? 0;
       const games = rawMatch.games ?? [];
+      const singlesGames = games.filter((game) => isTTBLSinglesGame(game));
+      rejectedDoublesGames += games.length - singlesGames.length;
 
-      for (const game of games) {
+      for (const game of singlesGames) {
         const homePlayer = game.homePlayer ?? game.homeLeaguePlayer ?? null;
         const awayPlayer = game.awayPlayer ?? game.awayLeaguePlayer ?? null;
 
@@ -415,11 +429,31 @@ export async function scrapeTTBLSeason(
           gameday,
           timestamp,
           gameIndex: game.index ?? 0,
+          format: "singles",
           gameState: game.gameState ?? "Unknown",
           winnerSide: game.winnerSide ?? null,
           homePlayer: { id: homePlayerId, name: homePlayerName },
           awayPlayer: { id: awayPlayerId, name: awayPlayerName },
         });
+
+        if (homePlayer?.id) {
+          allPlayers.push({
+            id: homePlayer.id,
+            firstName: homePlayer.firstName,
+            lastName: homePlayer.lastName,
+            imageUrl: homePlayer.imageUrl,
+            matchId,
+          });
+        }
+        if (awayPlayer?.id) {
+          allPlayers.push({
+            id: awayPlayer.id,
+            firstName: awayPlayer.firstName,
+            lastName: awayPlayer.lastName,
+            imageUrl: awayPlayer.imageUrl,
+            matchId,
+          });
+        }
 
         if (game.gameState !== "Finished") {
           continue;
@@ -470,29 +504,6 @@ export async function scrapeTTBLSeason(
         }
       }
 
-      const playersFromLineup = [
-        rawMatch.homePlayerOne,
-        rawMatch.homePlayerTwo,
-        rawMatch.homePlayerThree,
-        rawMatch.guestPlayerOne,
-        rawMatch.guestPlayerTwo,
-        rawMatch.guestPlayerThree,
-      ];
-
-      for (const player of playersFromLineup) {
-        if (!player) {
-          continue;
-        }
-
-        allPlayers.push({
-          id: player.id,
-          firstName: player.firstName,
-          lastName: player.lastName,
-          imageUrl: player.imageUrl,
-          matchId,
-        });
-      }
-
       matchSummaries.push({
         matchId: rawMatch.id ?? matchId,
         matchState: rawMatch.matchState ?? "Unknown",
@@ -512,7 +523,7 @@ export async function scrapeTTBLSeason(
           gameWins: rawMatch.awayGameWins ?? 0,
           setWins: rawMatch.awaySetWins ?? 0,
         },
-        gamesCount: games.length,
+        gamesCount: singlesGames.length,
         venue: rawMatch.venue?.name ?? "Unknown",
       });
     } catch {
@@ -531,7 +542,7 @@ export async function scrapeTTBLSeason(
       ) {
         emit(
           options.onLog,
-          `Season ${season}: processed ${processedMatchPayloads}/${allMatchIds.length} match payloads (accepted=${writtenRawMatches}, rejectedOutOfSeason=${rejectedOutOfSeason})`,
+          `Season ${season}: processed ${processedMatchPayloads}/${allMatchIds.length} match payloads (accepted=${writtenRawMatches}, rejectedOutOfSeason=${rejectedOutOfSeason}, rejectedDoublesGames=${rejectedDoublesGames})`,
         );
       }
     }
@@ -556,6 +567,20 @@ export async function scrapeTTBLSeason(
         .filter((player) => Boolean(player.id))
         .map((player) => [player.id as string, player]),
     ).values(),
+  );
+
+  const profileHydration = await hydrateTTBLPlayerProfiles(
+    uniquePlayers
+      .map((row) => row.id ?? "")
+      .filter((value) => value.length > 0),
+    {
+      delayMs: Math.min(Math.max(delayMs, 0), 120),
+      onLog: options.onLog,
+    },
+  );
+  emit(
+    options.onLog,
+    `Season ${season}: TTBL profile enrichment requested=${profileHydration.requested}, fetched=${profileHydration.fetched}, cached=${profileHydration.cached}, failed=${profileHydration.failed}.`,
   );
 
   const topPlayers = playerStatsFinal.filter((player) => player.gamesPlayed >= 5).slice(0, 20);
@@ -600,6 +625,9 @@ export async function scrapeTTBLSeason(
   if (rejectedOutOfSeason > 0) {
     emit(options.onLog, `Season ${season}: rejected ${rejectedOutOfSeason} out-of-season payloads.`);
   }
+  if (rejectedDoublesGames > 0) {
+    emit(options.onLog, `Season ${season}: filtered out ${rejectedDoublesGames} doubles games.`);
+  }
 
   return {
     metadata,
@@ -611,10 +639,25 @@ export async function scrapeTTBLSeason(
 }
 
 async function writeLegacyIndex(rows: TTBLLegacyIndexRow[]): Promise<void> {
+  const existing =
+    (await readJson<TTBLLegacyIndex>(TTBL_LEGACY_INDEX_FILE, null)) ?? null;
+  const mergedBySeason = new Map<string, TTBLLegacyIndexRow>();
+
+  for (const row of existing?.results ?? []) {
+    mergedBySeason.set(row.season, row);
+  }
+  for (const row of rows) {
+    // Always prefer freshly scraped season rows.
+    mergedBySeason.set(row.season, row);
+  }
+
+  const mergedRows = [...mergedBySeason.values()].sort(
+    (a, b) => parseSeasonStart(b.season) - parseSeasonStart(a.season),
+  );
   const index: TTBLLegacyIndex = {
     generatedAt: new Date().toISOString(),
-    seasons: rows.map((row) => row.season),
-    results: rows,
+    seasons: mergedRows.map((row) => row.season),
+    results: mergedRows,
   };
 
   await writeJson(TTBL_LEGACY_INDEX_FILE, index);

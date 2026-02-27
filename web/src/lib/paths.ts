@@ -37,6 +37,7 @@ export const TTBL_DATA_ROOT = path.join(DATA_ROOT, "ttbl");
 export const TTBL_OUTPUT_DIR = path.join(TTBL_DATA_ROOT, "current");
 export const TTBL_SEASONS_DIR = path.join(TTBL_DATA_ROOT, "seasons");
 export const TTBL_LEGACY_INDEX_FILE = path.join(TTBL_DATA_ROOT, "legacy_index.json");
+export const TTBL_PLAYER_PROFILES_FILE = path.join(TTBL_DATA_ROOT, "player_profiles.json");
 export const WTT_OUTPUT_DIR = path.join(DATA_ROOT, "wtt");
 
 export const PLAYERS_OUTPUT_DIR = path.join(DATA_ROOT, "players");

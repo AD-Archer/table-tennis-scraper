@@ -2,6 +2,7 @@ import path from "node:path";
 import { readJson } from "@/lib/fs";
 import { WTT_OUTPUT_DIR, getTTBLReadDir } from "@/lib/paths";
 import { NormalizedResult, TTBLGameRecord, WTTMatch } from "@/lib/types";
+import { isWTTGenderedSinglesEvent } from "@/lib/wtt/events";
 
 async function loadTTBLResults(): Promise<NormalizedResult[]> {
   const ttblReadDir = getTTBLReadDir();
@@ -49,7 +50,8 @@ async function loadWTTResults(): Promise<NormalizedResult[]> {
       (match) =>
         Boolean(match.players.a.ittf_id) &&
         Boolean(match.players.x.ittf_id) &&
-        Boolean(match.winner_inferred),
+        Boolean(match.winner_inferred) &&
+        isWTTGenderedSinglesEvent(match.event),
     )
     .map((match) => {
       const year = Number.parseInt(match.year ?? "", 10);

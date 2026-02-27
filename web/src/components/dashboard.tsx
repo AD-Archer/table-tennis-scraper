@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import { DashboardOverview } from "@/lib/dashboard-types";
 
 interface DashboardProps {
@@ -160,6 +161,14 @@ export function Dashboard({ initialOverview }: DashboardProps) {
     }
     return `${ttblSeasons[0]} to ${ttblSeasons[ttblSeasons.length - 1]} (${ttblSeasons.length} seasons)`;
   }, [ttblSeasons]);
+  const ttblLegacyTotalMatches = useMemo(
+    () =>
+      (overview.ttbl.legacy?.results ?? []).reduce(
+        (sum, row) => sum + (Number.isFinite(row.totalMatches) ? row.totalMatches : 0),
+        0,
+      ),
+    [overview.ttbl.legacy?.results],
+  );
   const wttYearsSummary = useMemo(() => {
     if (overview.wtt.years.length === 0) {
       return "no years scraped yet";
@@ -351,11 +360,29 @@ export function Dashboard({ initialOverview }: DashboardProps) {
       "/api/scrape/wtt",
       {
         years: wttYears,
-        pageSize: 500,
-        maxPages: 120,
-        delayMs: 250,
+        pageSize: 50,
+        maxPages: 180,
+        delayMs: 180,
+        tournamentScope: "wtt_only",
+        eventScope: "singles_only",
+        includeYouth: false,
+        profileEnrichMaxPlayers: 600,
+        profileEnrichMinMatches: 2,
       },
       "WTT scrape",
+    );
+  }
+
+  async function onRunTTBLAllTime() {
+    const nowYear = new Date().getUTCFullYear();
+    await invoke(
+      "/api/scrape/ttbl/all",
+      {
+        startYear: 1995,
+        endYear: nowYear + 1,
+        delayMs: 120,
+      },
+      "TTBL full refresh",
     );
   }
 
@@ -370,13 +397,33 @@ export function Dashboard({ initialOverview }: DashboardProps) {
       {
         ttblStartYear: 1995,
         ttblEndYear: nowYear + 1,
-        wttStartYear: 1926,
+        wttStartYear: 2017,
         wttEndYear: nowYear,
         wttPageSize: 500,
         wttMaxPages: 1200,
         delayMs: 100,
       },
       "Master sync",
+    );
+  }
+
+  async function onRunWTTAllTime() {
+    const nowYear = new Date().getUTCFullYear();
+    await invoke(
+      "/api/scrape/wtt/all",
+      {
+        startYear: 2017,
+        endYear: nowYear,
+        pageSize: 50,
+        maxPages: 1400,
+        delayMs: 120,
+        tournamentScope: "all",
+        eventScope: "singles_only",
+        includeYouth: false,
+        profileEnrichMaxPlayers: 0,
+        profileEnrichMinMatches: 3,
+      },
+      "WTT full refresh",
     );
   }
 
@@ -388,6 +435,11 @@ export function Dashboard({ initialOverview }: DashboardProps) {
           <h1 className="title">Scraper Control Deck</h1>
           <p className="lede">
             This app only scrapes and combines source data.
+          </p>
+          <p className="hint deck-link-wrap">
+            <Link className="ghost-link" href="/players">
+              Open player view
+            </Link>
           </p>
         </div>
         <div className="hero-meta">
@@ -420,9 +472,13 @@ export function Dashboard({ initialOverview }: DashboardProps) {
           <small>{wttYearsSummary}</small>
         </article>
         <article className="metric-card">
-          <span>TTBL Matches</span>
+          <span>TTBL Matches (Current)</span>
           <strong>{overview.ttbl.metadata?.totalMatches ?? 0}</strong>
-          <small>{ttblSeasonSummary}</small>
+          <small>
+            {ttblLegacyTotalMatches > 0
+              ? `all-time indexed: ${ttblLegacyTotalMatches}`
+              : ttblSeasonSummary}
+          </small>
         </article>
         <article className="metric-card">
           <span>WTT Matches</span>
@@ -458,13 +514,48 @@ export function Dashboard({ initialOverview }: DashboardProps) {
             <input value={wttYears} onChange={(e) => setWttYears(e.target.value)} />
           </label>
           <p className="hint">
-            Uses public Fabrik list API (<code>listid=31</code>) and writes
+            Uses public Fabrik list API (<code>listid=31</code>) with default filters:
+            WTT tournaments + singles-only + no youth. Writes
             <code>players.json</code>, <code>matches.json</code>, and <code>dataset.json</code>.
           </p>
           <button disabled={busyKey !== null} type="submit">
             {busyKey === "WTT scrape" ? "Running..." : "Scrape WTT"}
           </button>
         </form>
+
+        <div className="panel action-panel">
+          <h2>TTBL Full Refresh</h2>
+          <p className="hint">
+            Discover all available TTBL seasons and rescrape them without touching WTT files.
+          </p>
+          <p className="hint">
+            This is a weaker master sync: TTBL all-time + player registry rebuild only.
+          </p>
+          <button
+            disabled={busyKey !== null}
+            onClick={onRunTTBLAllTime}
+            type="button"
+          >
+            {busyKey === "TTBL full refresh" ? "Running..." : "TTBL full refresh (keep WTT)"}
+          </button>
+        </div>
+
+        <div className="panel action-panel">
+          <h2>WTT Full Refresh</h2>
+          <p className="hint">
+            Discover all available years and scrape WTT/ITTF data without touching TTBL files.
+          </p>
+          <p className="hint">
+            This is a weaker master sync: WTT all-time + player registry rebuild only, limited to men&apos;s/women&apos;s singles and youth excluded by default.
+          </p>
+          <button
+            disabled={busyKey !== null}
+            onClick={onRunWTTAllTime}
+            type="button"
+          >
+            {busyKey === "WTT full refresh" ? "Running..." : "WTT full refresh (keep TTBL)"}
+          </button>
+        </div>
 
         <div className="panel action-panel">
           <h2>Master Sync</h2>
@@ -511,13 +602,13 @@ export function Dashboard({ initialOverview }: DashboardProps) {
           <strong>Merge candidates:</strong> {overview.players?.totals.candidates ?? 0}
         </p>
         <p className="hint">
-          Manual alias overrides live in <code>data/players/manual_merges.json</code>.
+          Merge candidates below are unresolved/ambiguous identity cases discovered during automatic linking.
         </p>
       </section>
 
       <section className="panel">
         <h2>Last Action Log</h2>
-        <p className="hint">Live logs from TTBL, WTT, master sync, and destroy-data runs.</p>
+        <p className="hint">Live logs from TTBL, WTT, WTT full refresh, master sync, and destroy-data runs.</p>
         <p className="hint">
           <strong>{actionLogTitle}</strong>
         </p>

@@ -5,27 +5,11 @@ import {
   startActionJob,
 } from "@/lib/jobs/action-job";
 
-function parseYears(value: unknown): number[] {
-  if (Array.isArray(value)) {
-    return value
-      .map((year) => Number.parseInt(String(year), 10))
-      .filter((year) => Number.isFinite(year));
-  }
-
-  if (typeof value === "string") {
-    return value
-      .split(",")
-      .map((year) => Number.parseInt(year.trim(), 10))
-      .filter((year) => Number.isFinite(year));
-  }
-
-  return [];
-}
-
 export async function POST(request: Request) {
   try {
     const body = (await request.json().catch(() => ({}))) as {
-      years?: number[] | string;
+      startYear?: number;
+      endYear?: number;
       pageSize?: number;
       maxPages?: number;
       delayMs?: number;
@@ -36,17 +20,17 @@ export async function POST(request: Request) {
       profileEnrichMinMatches?: number;
     };
 
-    const years = parseYears(body.years);
-    const { alreadyRunning, status } = startActionJob("wtt", {
-      years,
+    const { alreadyRunning, status } = startActionJob("wtt-all-time", {
+      startYear: body.startYear,
+      endYear: body.endYear,
       pageSize: body.pageSize,
       maxPages: body.maxPages,
       delayMs: body.delayMs,
-      tournamentScope: body.tournamentScope ?? "wtt_only",
+      tournamentScope: body.tournamentScope ?? "all",
       eventScope: body.eventScope ?? "singles_only",
       includeYouth: body.includeYouth ?? false,
-      profileEnrichMaxPlayers: body.profileEnrichMaxPlayers ?? 600,
-      profileEnrichMinMatches: body.profileEnrichMinMatches ?? 2,
+      profileEnrichMaxPlayers: body.profileEnrichMaxPlayers ?? 0,
+      profileEnrichMinMatches: body.profileEnrichMinMatches ?? 3,
     });
 
     return NextResponse.json({
@@ -70,7 +54,7 @@ export async function GET(request: Request) {
   try {
     const url = new URL(request.url);
     const jobId = url.searchParams.get("jobId")?.trim();
-    const status = jobId ? getActionJob(jobId) : getLatestActionJob("wtt");
+    const status = jobId ? getActionJob(jobId) : getLatestActionJob("wtt-all-time");
 
     return NextResponse.json({
       ok: true,
@@ -78,8 +62,8 @@ export async function GET(request: Request) {
       message: status
         ? undefined
         : jobId
-          ? `No WTT scrape job found for jobId=${jobId}`
-          : "No WTT scrape job has been started yet.",
+          ? `No WTT all-time scrape job found for jobId=${jobId}`
+          : "No WTT all-time scrape job has been started yet.",
     });
   } catch (error) {
     return NextResponse.json(

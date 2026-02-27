@@ -13,13 +13,13 @@ import {
 } from "@/lib/paths";
 import { ensurePlayerRegistry } from "@/lib/players/registry";
 import {
-  PlayerRegistrySnapshot,
   TTBLLegacyIndex,
   TTBLGameRecord,
   TTBLMetadata,
   TTBLPlayerStats,
   WTTMatch,
 } from "@/lib/types";
+import { isWTTGenderedSinglesEvent } from "@/lib/wtt/events";
 
 const appEndpoints: EndpointRow[] = [
   {
@@ -35,8 +35,20 @@ const appEndpoints: EndpointRow[] = [
   },
   {
     method: "POST",
+    path: "/api/scrape/ttbl/all",
+    description:
+      "Run all-time TTBL scrape (discover seasons + scrape + rebuild players) without deleting WTT data.",
+  },
+  {
+    method: "POST",
     path: "/api/scrape/wtt",
     description: "Run ITTF/WTT Fabrik scraper for one or more years.",
+  },
+  {
+    method: "POST",
+    path: "/api/scrape/wtt/all",
+    description:
+      "Run all-time WTT scrape (discover years + scrape + rebuild players) without deleting TTBL data.",
   },
   {
     method: "POST",
@@ -61,8 +73,24 @@ const appEndpoints: EndpointRow[] = [
   },
   {
     method: "GET",
+    path: "/api/players/slugs",
+    description:
+      "Read flattened canonical player rows with merge candidates, match stats, scores, and inferred gender.",
+  },
+  {
+    method: "GET",
     path: "/api/endpoints",
     description: "List scraper and registry endpoint references.",
+  },
+  {
+    method: "POST",
+    path: "/api/mcp",
+    description: "MCP JSON-RPC endpoint exposing scrape controls, diagnostics, matches, and places.",
+  },
+  {
+    method: "GET",
+    path: "/api/mcp",
+    description: "MCP endpoint metadata and tool catalog.",
   },
 ];
 
@@ -73,7 +101,7 @@ export function getEndpointCatalog(): EndpointRow[] {
 export async function getDashboardOverview(): Promise<DashboardOverview> {
   const ttblReadDir = getTTBLReadDir();
 
-  const [ttblMetadata, ttblTopPlayers, ttblGames, ttblLegacy, wttDataset, existingRegistry] =
+  const [ttblMetadata, ttblTopPlayers, ttblGames, ttblLegacy, wttDataset, registry] =
     await Promise.all([
       readJson<TTBLMetadata>(path.join(ttblReadDir, "metadata.json"), null),
       readJson<TTBLPlayerStats[]>(
@@ -89,10 +117,8 @@ export async function getDashboardOverview(): Promise<DashboardOverview> {
         metadata?: { years?: number[]; matches?: number; players?: number };
         matches?: WTTMatch[];
       }>(path.join(WTT_OUTPUT_DIR, "dataset.json"), null),
-      readJson<PlayerRegistrySnapshot>(PLAYERS_REGISTRY_FILE, null),
+      ensurePlayerRegistry(),
     ]);
-
-  const registry = existingRegistry ?? (await ensurePlayerRegistry());
 
   const validFinishedGames = (ttblGames ?? []).filter(
     (game) =>
@@ -101,6 +127,13 @@ export async function getDashboardOverview(): Promise<DashboardOverview> {
       Boolean(game.homePlayer.id) &&
       Boolean(game.awayPlayer.id),
   ).length;
+  const filteredWTTMatches = (wttDataset?.matches ?? []).filter((row) =>
+    isWTTGenderedSinglesEvent(row.event),
+  );
+  const wttTotalMatches =
+    (wttDataset?.matches?.length ?? 0) > 0
+      ? filteredWTTMatches.length
+      : (wttDataset?.metadata?.matches ?? 0);
 
   const fileLocations: FileLocationRow[] = [
     {
@@ -151,9 +184,9 @@ export async function getDashboardOverview(): Promise<DashboardOverview> {
     },
     wtt: {
       years: wttDataset?.metadata?.years ?? [],
-      totalMatches: wttDataset?.metadata?.matches ?? 0,
+      totalMatches: wttTotalMatches,
       totalPlayers: wttDataset?.metadata?.players ?? 0,
-      sampleMatches: wttDataset?.matches?.slice(0, 8) ?? [],
+      sampleMatches: filteredWTTMatches.slice(0, 8),
     },
     players: registry,
     fileLocations,

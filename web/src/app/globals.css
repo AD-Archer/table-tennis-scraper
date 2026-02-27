@@ -168,6 +168,16 @@ input {
   font-family: var(--font-ibm-plex-mono), monospace;
 }
 
+select {
+  height: 2.4rem;
+  border-radius: 10px;
+  border: 1px solid var(--stroke);
+  background: #fff;
+  padding: 0.5rem 0.7rem;
+  color: var(--text-main);
+  font-family: var(--font-ibm-plex-mono), monospace;
+}
+
 .checkbox-row {
   grid-template-columns: auto 1fr;
   align-items: center;
@@ -204,6 +214,23 @@ button {
   color: var(--text-main);
 }
 
+.ghost-link {
+  display: inline-flex;
+  align-items: center;
+  height: 2.1rem;
+  border: 1px solid var(--stroke);
+  border-radius: 10px;
+  padding: 0 0.8rem;
+  color: var(--text-main);
+  text-decoration: none;
+  font-size: 0.83rem;
+  background: #fff;
+}
+
+.ghost-link:hover {
+  background: #f4f6f7;
+}
+
 .ghost-button:hover:enabled {
   box-shadow: none;
   transform: none;
@@ -224,6 +251,10 @@ button:disabled {
   margin: 0;
   color: var(--text-muted);
   font-size: 0.83rem;
+}
+
+.deck-link-wrap {
+  margin-top: 0.8rem;
 }
 
 .data-grid {
@@ -296,6 +327,34 @@ tbody td {
   text-transform: uppercase;
   color: var(--ok);
   letter-spacing: 0.08em;
+}
+
+.players-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.9rem;
+  align-items: flex-start;
+}
+
+.players-header-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.tiny-row {
+  color: var(--text-muted);
+  font-size: 0.76rem;
+}
+
+.stack-mini {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.players-filter-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.8rem;
 }
 
 .clean-scrape-panel {
@@ -408,8 +467,13 @@ tbody td {
   .controls-grid,
   .data-grid,
   .file-grid,
-  .clean-status-grid {
+  .clean-status-grid,
+  .players-filter-grid {
     grid-template-columns: 1fr;
+  }
+
+  .players-header {
+    flex-direction: column;
   }
 
   .dashboard-shell {

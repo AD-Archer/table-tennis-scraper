@@ -55,7 +55,7 @@ export async function runCleanScrape(
     ttblStartYear: options.ttblStartYear ?? 1995,
     ttblEndYear: options.ttblEndYear ?? nowYear + 1,
     ttblNumGamedays: options.ttblNumGamedays,
-    wttStartYear: options.wttStartYear ?? 1926,
+    wttStartYear: options.wttStartYear ?? 2017,
     wttEndYear: options.wttEndYear ?? nowYear,
     wttPageSize: options.wttPageSize ?? 500,
     wttMaxPages: options.wttMaxPages ?? 1200,
@@ -90,6 +90,10 @@ export async function runCleanScrape(
     pageSize: resolved.wttPageSize,
     maxPages: resolved.wttMaxPages,
     delayMs: resolved.delayMs,
+    tournamentScope: "all",
+    eventScope: "singles_only",
+    includeYouth: true,
+    profileEnrichMaxPlayers: 0,
     onLog,
   });
   emit(
