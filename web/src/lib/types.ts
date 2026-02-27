@@ -195,6 +195,7 @@ export type PlayerGender = "M" | "W" | "mixed" | "unknown";
 export type PlayerGenderSource =
   | "wtt_event_inference"
   | "wtt_profile_gender"
+  | "ttbl_league_inference"
   | "ttbl_default_assumption"
   | "unknown";
 export type PlayerCountrySource =

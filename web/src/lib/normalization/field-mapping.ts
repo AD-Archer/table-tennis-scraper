@@ -317,11 +317,12 @@ export const PLAYER_FIELD_MAPPING: CanonicalFieldMappingEntry[] = [
     normalizer: "gender_code",
     valueType: "M|W|mixed|unknown",
     sourcePaths: {
-      ttbl: ["(no explicit field, fallback rule)"],
+      ttbl: ["league/context inference when available"],
       wtt: ["inferred from match event labels"],
     },
     preferredSourceOrder: ["wtt", "ttbl"],
-    notes: "TTBL currently has no explicit gender field in our scrape payload.",
+    notes:
+      "TTBL currently has no explicit gender field in our scrape payload; gender is inferred from TTBL league context when possible.",
   },
   {
     field: "birthDate",
@@ -437,6 +438,7 @@ export function resolveCanonicalGender(
   signals: {
     eventInferredGender: PlayerGender;
     wttProfileGender: PlayerGender;
+    ttblInferredGender: PlayerGender;
     hasTTBLMember: boolean;
   },
 ): { gender: PlayerGender; source: PlayerGenderSource } {
@@ -451,6 +453,13 @@ export function resolveCanonicalGender(
     return {
       gender: signals.wttProfileGender,
       source: "wtt_profile_gender",
+    };
+  }
+
+  if (signals.ttblInferredGender !== "unknown") {
+    return {
+      gender: signals.ttblInferredGender,
+      source: "ttbl_league_inference",
     };
   }
 
