@@ -2,6 +2,7 @@ import path from "node:path";
 import { promises as fs } from "node:fs";
 import { assertDataPath, fileExists, readJson } from "@/lib/fs";
 import { TTBL_SEASONS_DIR, WTT_OUTPUT_DIR, getTTBLReadDir } from "@/lib/paths";
+import { getPlayerSlugOverview } from "@/lib/players/slugs";
 import {
   TTBLGameRecord,
   TTBLMatchSummary,
@@ -43,7 +44,9 @@ export interface TTBLMatchDetail {
   selectedGameState: string | null;
   selectedGameWinnerSide: "Home" | "Away" | null;
   selectedGameHomePlayer: string | null;
+  selectedGameHomePlayerSlug: string | null;
   selectedGameAwayPlayer: string | null;
+  selectedGameAwayPlayerSlug: string | null;
   selectedGameHomeSets: number | null;
   selectedGameAwaySets: number | null;
   selectedGameSetScores: TTBLGameSetScore[];
@@ -67,8 +70,10 @@ export interface WTTMatchDetail {
   walkover: boolean | null;
   winnerInferred: "A" | "X" | null;
   playerAName: string | null;
+  playerASlug: string | null;
   playerAAssociation: string | null;
   playerXName: string | null;
+  playerXSlug: string | null;
   playerXAssociation: string | null;
   finalSetsA: number | null;
   finalSetsX: number | null;
@@ -105,6 +110,51 @@ function parseTTBLMatchReference(value: string): ParsedTTBLMatchRef {
     matchId: match[1].trim(),
     gameIndex: Number.isFinite(gameIndex) && gameIndex > 0 ? gameIndex : null,
   };
+}
+
+function parseSourceToken(token: string): { source: MatchSource; sourceId: string } | null {
+  const trimmed = token.trim();
+  const delimiter = trimmed.indexOf(":");
+  if (delimiter <= 0) {
+    return null;
+  }
+
+  const source = trimmed.slice(0, delimiter);
+  const sourceId = trimmed.slice(delimiter + 1).trim();
+  if ((source !== "ttbl" && source !== "wtt") || !sourceId) {
+    return null;
+  }
+
+  return { source, sourceId };
+}
+
+async function buildSlugBySourceKey(): Promise<Map<string, string>> {
+  const overview = await getPlayerSlugOverview(Number.MAX_SAFE_INTEGER);
+  const map = new Map<string, string>();
+  const ambiguous = new Set<string>();
+
+  for (const row of overview.players) {
+    for (const sourceToken of row.sourceIds) {
+      const parsed = parseSourceToken(sourceToken);
+      if (!parsed) {
+        continue;
+      }
+
+      const key = `${parsed.source}:${parsed.sourceId}`;
+      const existing = map.get(key);
+      if (existing && existing !== row.slug) {
+        map.delete(key);
+        ambiguous.add(key);
+        continue;
+      }
+
+      if (!ambiguous.has(key)) {
+        map.set(key, row.slug);
+      }
+    }
+  }
+
+  return map;
 }
 
 function toIsoFromUnixSeconds(value: number | null | undefined): string | null {
@@ -342,6 +392,7 @@ async function listTTBLSeasonEntries(): Promise<TTBLSeasonEntry[]> {
 
 async function getTTBLMatchDetail(requestedMatchId: string): Promise<TTBLMatchDetail> {
   const parsed = parseTTBLMatchReference(requestedMatchId);
+  const slugBySourceKey = await buildSlugBySourceKey();
   const baseDetail: TTBLMatchDetail = {
     source: "ttbl",
     requestedMatchId,
@@ -363,7 +414,9 @@ async function getTTBLMatchDetail(requestedMatchId: string): Promise<TTBLMatchDe
     selectedGameState: null,
     selectedGameWinnerSide: null,
     selectedGameHomePlayer: null,
+    selectedGameHomePlayerSlug: null,
     selectedGameAwayPlayer: null,
+    selectedGameAwayPlayerSlug: null,
     selectedGameHomeSets: null,
     selectedGameAwaySets: null,
     selectedGameSetScores: [],
@@ -403,6 +456,10 @@ async function getTTBLMatchDetail(requestedMatchId: string): Promise<TTBLMatchDe
     const selectedGameRow = selectedGame ? asRecord(selectedGame) : null;
     const selectedGameHomePlayer = asRecord(selectedGameRow?.homePlayer);
     const selectedGameAwayPlayer = asRecord(selectedGameRow?.awayPlayer);
+    const selectedGameHomePlayerId =
+      toNullableString(selectedGameHomePlayer?.id) ?? gameStats?.homePlayer?.id ?? null;
+    const selectedGameAwayPlayerId =
+      toNullableString(selectedGameAwayPlayer?.id) ?? gameStats?.awayPlayer?.id ?? null;
     const homeTeam = asRecord(matchPayload?.homeTeam);
     const awayTeam = asRecord(matchPayload?.awayTeam);
     const derivedTotals = deriveTTBLTotalsFromGames(matchPayload);
@@ -453,8 +510,14 @@ async function getTTBLMatchDetail(requestedMatchId: string): Promise<TTBLMatchDe
         parseWinnerSide(selectedGameRow?.winnerSide) ?? gameStats?.winnerSide ?? null,
       selectedGameHomePlayer:
         toNullableString(selectedGameHomePlayer?.name) ?? gameStats?.homePlayer?.name ?? null,
+      selectedGameHomePlayerSlug: selectedGameHomePlayerId
+        ? slugBySourceKey.get(`ttbl:${selectedGameHomePlayerId}`) ?? null
+        : null,
       selectedGameAwayPlayer:
         toNullableString(selectedGameAwayPlayer?.name) ?? gameStats?.awayPlayer?.name ?? null,
+      selectedGameAwayPlayerSlug: selectedGameAwayPlayerId
+        ? slugBySourceKey.get(`ttbl:${selectedGameAwayPlayerId}`) ?? null
+        : null,
       selectedGameHomeSets: toNullableNumber(selectedGameRow?.homeSets),
       selectedGameAwaySets: toNullableNumber(selectedGameRow?.awaySets),
       selectedGameSetScores: buildSetScores(selectedGameRow),
@@ -470,6 +533,7 @@ async function getTTBLMatchDetail(requestedMatchId: string): Promise<TTBLMatchDe
 
 async function getWTTMatchDetail(requestedMatchId: string): Promise<WTTMatchDetail> {
   const matchId = requestedMatchId.trim();
+  const slugBySourceKey = await buildSlugBySourceKey();
   const matches =
     (await readJson<WTTMatch[]>(path.join(WTT_OUTPUT_DIR, "matches.json"), [])) ?? [];
   const match = matches.find((row) => row.match_id === matchId) ?? null;
@@ -488,8 +552,14 @@ async function getWTTMatchDetail(requestedMatchId: string): Promise<WTTMatchDeta
     walkover: typeof match?.walkover === "boolean" ? match.walkover : null,
     winnerInferred: match?.winner_inferred ?? null,
     playerAName: match?.players.a.name ?? match?.players.a.ittf_id ?? null,
+    playerASlug: match?.players.a.ittf_id
+      ? slugBySourceKey.get(`wtt:${match.players.a.ittf_id}`) ?? null
+      : null,
     playerAAssociation: match?.players.a.association ?? null,
     playerXName: match?.players.x.name ?? match?.players.x.ittf_id ?? null,
+    playerXSlug: match?.players.x.ittf_id
+      ? slugBySourceKey.get(`wtt:${match.players.x.ittf_id}`) ?? null
+      : null,
     playerXAssociation: match?.players.x.association ?? null,
     finalSetsA:
       typeof match?.final_sets.a === "number" && Number.isFinite(match.final_sets.a)

@@ -1,16 +1,50 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
-import { PlayerGender, PlayerSlugOverview } from "@/lib/types";
+import { useCallback, useEffect, useState } from "react";
+import { PlayerGender, PlayerSlugRow } from "@/lib/types";
 
-interface PlayerSlugBrowserProps {
-  initialOverview: PlayerSlugOverview;
-}
+const PAGE_SIZE = 30;
 
 type SourceFilter = "all" | "ttbl" | "wtt" | "cross-source";
 type MergeFilter = "all" | "with-candidates" | "without-candidates";
-type SortMode = "matches-desc" | "name-asc" | "merge-desc";
+type SortBy = "matches" | "name" | "mergeCandidates";
+type SortDir = "asc" | "desc";
+
+interface PlayersApiResponse {
+  ok: boolean;
+  generatedAt: string;
+  totals: {
+    players: number;
+    withMergeCandidates: number;
+    withKnownGender: number;
+  };
+  page: {
+    limit: number;
+    offset: number;
+    returned: number;
+    total: number;
+    totalAll: number;
+    hasMore: boolean;
+    sortBy: SortBy;
+    sortDir: SortDir;
+  };
+  filters: {
+    sourceFilter: SourceFilter;
+    genderFilter: "all" | PlayerGender;
+    mergeFilter: MergeFilter;
+    countryFilter: string;
+    seasonFilter: string;
+    minMatches: number;
+    query: string;
+  };
+  filterOptions: {
+    countries: string[];
+    seasonsAndYears: string[];
+  };
+  players: PlayerSlugRow[];
+  error?: string;
+}
 
 function fmtRate(value: number | null): string {
   if (value === null) {
@@ -20,11 +54,9 @@ function fmtRate(value: number | null): string {
   return `${value.toFixed(1)}%`;
 }
 
-function normalize(value: string): string {
-  return value.trim().toLowerCase();
-}
+export function PlayerSlugBrowser() {
+  const [rows, setRows] = useState<PlayerSlugRow[]>([]);
 
-export function PlayerSlugBrowser({ initialOverview }: PlayerSlugBrowserProps) {
   const [query, setQuery] = useState("");
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
   const [genderFilter, setGenderFilter] = useState<"all" | PlayerGender>("all");
@@ -32,129 +64,81 @@ export function PlayerSlugBrowser({ initialOverview }: PlayerSlugBrowserProps) {
   const [countryFilter, setCountryFilter] = useState("all");
   const [seasonFilter, setSeasonFilter] = useState("all");
   const [minMatches, setMinMatches] = useState("0");
-  const [sortMode, setSortMode] = useState<SortMode>("matches-desc");
-  const [rowLimit, setRowLimit] = useState("200");
+  const [sortBy, setSortBy] = useState<SortBy>("matches");
+  const [sortDir, setSortDir] = useState<SortDir>("desc");
 
-  const countries = useMemo(() => {
-    return [...new Set(initialOverview.players.map((row) => row.country).filter(Boolean))]
-      .map((row) => row as string)
-      .sort((a, b) => a.localeCompare(b));
-  }, [initialOverview.players]);
+  const [countries, setCountries] = useState<string[]>([]);
+  const [seasonsAndYears, setSeasonsAndYears] = useState<string[]>([]);
 
-  const seasonsAndYears = useMemo(() => {
-    const rows = new Set<string>();
-    for (const player of initialOverview.players) {
-      for (const season of player.seasons) {
-        rows.add(season);
-      }
-      for (const match of player.recentMatches) {
-        if (match.seasonOrYear) {
-          rows.add(match.seasonOrYear);
+  const [generatedAt, setGeneratedAt] = useState<string | null>(null);
+  const [totalAllPlayers, setTotalAllPlayers] = useState(0);
+  const [totalFilteredPlayers, setTotalFilteredPlayers] = useState(0);
+  const [withMergeCandidates, setWithMergeCandidates] = useState(0);
+  const [withKnownGender, setWithKnownGender] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchPage = useCallback(
+    async (offset: number, append: boolean) => {
+      setLoading(true);
+      setError(null);
+
+      try {
+        const minMatchesNum = Math.max(0, Number.parseInt(minMatches, 10) || 0);
+        const params = new URLSearchParams({
+          limit: String(PAGE_SIZE),
+          offset: String(offset),
+          sortBy,
+          sortDir,
+          sourceFilter,
+          genderFilter,
+          mergeFilter,
+          countryFilter,
+          seasonFilter,
+          minMatches: String(minMatchesNum),
+          query,
+        });
+
+        const response = await fetch(`/api/players/slugs?${params.toString()}`, {
+          cache: "no-store",
+        });
+        const payload = (await response.json()) as PlayersApiResponse;
+        if (!response.ok || !payload.ok) {
+          throw new Error(payload.error ?? `HTTP ${response.status}`);
         }
+
+        setRows((prev) => (append ? [...prev, ...payload.players] : payload.players));
+        setGeneratedAt(payload.generatedAt);
+        setTotalFilteredPlayers(payload.page.total);
+        setTotalAllPlayers(payload.page.totalAll);
+        setHasMore(payload.page.hasMore);
+        setWithMergeCandidates(payload.totals.withMergeCandidates);
+        setWithKnownGender(payload.totals.withKnownGender);
+        setCountries(payload.filterOptions.countries);
+        setSeasonsAndYears(payload.filterOptions.seasonsAndYears);
+      } catch (fetchError) {
+        setError(fetchError instanceof Error ? fetchError.message : "unknown error");
+      } finally {
+        setLoading(false);
       }
-    }
+    },
+    [
+      query,
+      sourceFilter,
+      genderFilter,
+      mergeFilter,
+      countryFilter,
+      seasonFilter,
+      minMatches,
+      sortBy,
+      sortDir,
+    ],
+  );
 
-    return [...rows].sort((a, b) => b.localeCompare(a));
-  }, [initialOverview.players]);
-
-  const filtered = useMemo(() => {
-    const queryNorm = normalize(query);
-    const minMatchesValue = Math.max(0, Number.parseInt(minMatches, 10) || 0);
-
-    const rows = initialOverview.players.filter((player) => {
-      if (player.matchesPlayed < minMatchesValue) {
-        return false;
-      }
-
-      if (sourceFilter === "ttbl" && !player.sources.includes("ttbl")) {
-        return false;
-      }
-      if (sourceFilter === "wtt" && !player.sources.includes("wtt")) {
-        return false;
-      }
-      if (sourceFilter === "cross-source" && player.sources.length < 2) {
-        return false;
-      }
-
-      if (genderFilter !== "all" && player.gender !== genderFilter) {
-        return false;
-      }
-
-      if (mergeFilter === "with-candidates" && player.mergeCandidates.length === 0) {
-        return false;
-      }
-      if (mergeFilter === "without-candidates" && player.mergeCandidates.length > 0) {
-        return false;
-      }
-
-      if (countryFilter !== "all" && player.country !== countryFilter) {
-        return false;
-      }
-
-      if (seasonFilter !== "all") {
-        const inSeasons = player.seasons.includes(seasonFilter);
-        const inRecent = player.recentMatches.some(
-          (match) => match.seasonOrYear === seasonFilter,
-        );
-        if (!inSeasons && !inRecent) {
-          return false;
-        }
-      }
-
-      if (!queryNorm) {
-        return true;
-      }
-
-      const haystack = [
-        player.slug,
-        player.canonicalKey,
-        player.displayName,
-        player.country ?? "",
-        player.gender,
-        player.sourceIds.join(" "),
-        player.seasons.join(" "),
-        player.mergeCandidates.map((row) => row.otherName).join(" "),
-      ]
-        .join(" ")
-        .toLowerCase();
-
-      return haystack.includes(queryNorm);
-    });
-
-    if (sortMode === "name-asc") {
-      rows.sort((a, b) => a.displayName.localeCompare(b.displayName));
-    } else if (sortMode === "merge-desc") {
-      rows.sort(
-        (a, b) =>
-          b.mergeCandidates.length - a.mergeCandidates.length ||
-          b.matchesPlayed - a.matchesPlayed ||
-          a.displayName.localeCompare(b.displayName),
-      );
-    } else {
-      rows.sort(
-        (a, b) =>
-          b.matchesPlayed - a.matchesPlayed ||
-          b.wins - a.wins ||
-          a.displayName.localeCompare(b.displayName),
-      );
-    }
-
-    return rows;
-  }, [
-    countryFilter,
-    genderFilter,
-    initialOverview.players,
-    mergeFilter,
-    minMatches,
-    query,
-    seasonFilter,
-    sortMode,
-    sourceFilter,
-  ]);
-
-  const limit = Number.parseInt(rowLimit, 10);
-  const appliedLimit = Number.isFinite(limit) && limit > 0 ? limit : filtered.length;
-  const visibleRows = filtered.slice(0, appliedLimit);
+  useEffect(() => {
+    void fetchPage(0, false);
+  }, [fetchPage]);
 
   return (
     <main className="mx-auto my-8 grid w-[min(1400px,calc(100%-2rem))] gap-4">
@@ -168,8 +152,7 @@ export function PlayerSlugBrowser({ initialOverview }: PlayerSlugBrowserProps) {
               Canonical Player Rollup
             </h1>
             <p className="mt-2 mb-0 max-w-3xl text-sm text-slate-600">
-              Search and filter canonical players with merge candidates, matches, scores,
-              and inferred gender.
+              Server-side filters + sorting, loaded in pages of {PAGE_SIZE}.
             </p>
           </div>
           <div className="flex gap-2">
@@ -188,38 +171,31 @@ export function PlayerSlugBrowser({ initialOverview }: PlayerSlugBrowserProps) {
           <span className="font-mono text-xs uppercase tracking-[0.08em] text-slate-500">
             Canonical Players
           </span>
-          <strong className="text-2xl leading-tight text-slate-900">
-            {initialOverview.totals.players}
-          </strong>
-          <small className="text-sm text-slate-600">from TTBL + WTT sources</small>
+          <strong className="text-2xl leading-tight text-slate-900">{totalAllPlayers}</strong>
+          <small className="text-sm text-slate-600">full dataset</small>
         </article>
         <article className="grid gap-1 rounded-2xl border border-slate-300 bg-slate-50 p-4">
           <span className="font-mono text-xs uppercase tracking-[0.08em] text-slate-500">
-            With Merge Candidates
+            Filtered Total
           </span>
-          <strong className="text-2xl leading-tight text-slate-900">
-            {initialOverview.totals.withMergeCandidates}
-          </strong>
-          <small className="text-sm text-slate-600">needs manual review</small>
+          <strong className="text-2xl leading-tight text-slate-900">{totalFilteredPlayers}</strong>
+          <small className="text-sm text-slate-600">after filters</small>
         </article>
         <article className="grid gap-1 rounded-2xl border border-slate-300 bg-slate-50 p-4">
           <span className="font-mono text-xs uppercase tracking-[0.08em] text-slate-500">
-            Known Gender
+            Loaded Rows
           </span>
-          <strong className="text-2xl leading-tight text-slate-900">
-            {initialOverview.totals.withKnownGender}
-          </strong>
-          <small className="text-sm text-slate-600">inferred from WTT event labels</small>
+          <strong className="text-2xl leading-tight text-slate-900">{rows.length}</strong>
+          <small className="text-sm text-slate-600">{hasMore ? "more available" : "all loaded"}</small>
         </article>
         <article className="grid gap-1 rounded-2xl border border-slate-300 bg-slate-50 p-4">
           <span className="font-mono text-xs uppercase tracking-[0.08em] text-slate-500">
-            Filtered Rows
+            Merge / Gender
           </span>
-          <strong className="text-2xl leading-tight text-slate-900">{visibleRows.length}</strong>
-          <small className="text-sm text-slate-600">
-            of {filtered.length}
-            {filtered.length > visibleRows.length ? " (limited)" : ""}
-          </small>
+          <strong className="text-2xl leading-tight text-slate-900">
+            {withMergeCandidates} / {withKnownGender}
+          </strong>
+          <small className="text-sm text-slate-600">{generatedAt ?? "-"}</small>
         </article>
       </section>
 
@@ -308,38 +284,37 @@ export function PlayerSlugBrowser({ initialOverview }: PlayerSlugBrowserProps) {
             Min Matches
             <input
               className="h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm font-normal normal-case tracking-normal text-slate-900 outline-none focus:border-teal-600"
-              type="number"
               min={0}
+              type="number"
               value={minMatches}
               onChange={(e) => setMinMatches(e.target.value)}
             />
           </label>
           <label className="grid gap-1 text-xs font-semibold uppercase tracking-[0.08em] text-slate-600">
-            Sort
+            Sort By
             <select
               className="h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm font-normal normal-case tracking-normal text-slate-900 outline-none focus:border-teal-600"
-              value={sortMode}
-              onChange={(e) => setSortMode(e.target.value as SortMode)}
+              value={sortBy}
+              onChange={(e) => setSortBy(e.target.value as SortBy)}
             >
-              <option value="matches-desc">Most matches</option>
-              <option value="merge-desc">Most merge candidates</option>
-              <option value="name-asc">Name A-Z</option>
+              <option value="matches">Matches</option>
+              <option value="mergeCandidates">Merge candidates</option>
+              <option value="name">Name</option>
             </select>
           </label>
           <label className="grid gap-1 text-xs font-semibold uppercase tracking-[0.08em] text-slate-600">
-            Row Limit
+            Direction
             <select
               className="h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm font-normal normal-case tracking-normal text-slate-900 outline-none focus:border-teal-600"
-              value={rowLimit}
-              onChange={(e) => setRowLimit(e.target.value)}
+              value={sortDir}
+              onChange={(e) => setSortDir(e.target.value as SortDir)}
             >
-              <option value="100">100</option>
-              <option value="200">200</option>
-              <option value="500">500</option>
-              <option value="-1">All</option>
+              <option value="desc">Descending</option>
+              <option value="asc">Ascending</option>
             </select>
           </label>
         </div>
+        {error ? <p className="mt-2 mb-0 text-sm text-rose-700">Error: {error}</p> : null}
       </section>
 
       <section className="rounded-2xl border border-slate-300 bg-white p-4 shadow-sm">
@@ -358,7 +333,7 @@ export function PlayerSlugBrowser({ initialOverview }: PlayerSlugBrowserProps) {
               </tr>
             </thead>
             <tbody className="[&_tr]:border-b [&_tr]:border-slate-200">
-              {visibleRows.map((player) => (
+              {rows.map((player) => (
                 <tr key={player.canonicalKey}>
                   <td className="align-top px-2 py-2">
                     <code>{player.slug}</code>
@@ -442,6 +417,19 @@ export function PlayerSlugBrowser({ initialOverview }: PlayerSlugBrowserProps) {
               ))}
             </tbody>
           </table>
+        </div>
+        <div className="mt-4 flex items-center justify-between gap-3">
+          <p className="m-0 text-sm text-slate-600">
+            Showing {rows.length} of {totalFilteredPlayers} filtered players
+          </p>
+          <button
+            className="inline-flex h-10 items-center rounded-lg border border-slate-300 bg-white px-4 text-sm text-slate-900 hover:bg-slate-100 disabled:opacity-50"
+            disabled={loading || !hasMore}
+            onClick={() => void fetchPage(rows.length, true)}
+            type="button"
+          >
+            {loading ? "Loading..." : hasMore ? `Load ${PAGE_SIZE} more` : "No more players"}
+          </button>
         </div>
       </section>
     </main>

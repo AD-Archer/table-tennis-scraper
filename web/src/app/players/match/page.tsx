@@ -47,6 +47,31 @@ function stringify(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
 
+function PlayerSlugLink({
+  name,
+  slug,
+}: {
+  name: string | null;
+  slug: string | null;
+}) {
+  if (!name) {
+    return <>-</>;
+  }
+
+  if (!slug) {
+    return <>{name}</>;
+  }
+
+  return (
+    <Link
+      className="text-teal-700 underline decoration-teal-300 underline-offset-2 hover:text-teal-900"
+      href={`/players/${slug}`}
+    >
+      {name}
+    </Link>
+  );
+}
+
 export default async function MatchDetailPage({ searchParams }: MatchDetailPageProps) {
   const params = await searchParams;
   const sourceParam = firstParam(params.source);
@@ -129,7 +154,15 @@ async function MatchDetailBody({ source, matchId }: { source: MatchSource; match
             </span>
             <strong className="text-2xl leading-tight text-slate-900">{detail.selectedGameIndex ?? "-"}</strong>
             <small className="text-sm text-slate-600">
-              {detail.selectedGameHomePlayer ?? "-"} vs {detail.selectedGameAwayPlayer ?? "-"}
+              <PlayerSlugLink
+                name={detail.selectedGameHomePlayer}
+                slug={detail.selectedGameHomePlayerSlug}
+              />{" "}
+              vs{" "}
+              <PlayerSlugLink
+                name={detail.selectedGameAwayPlayer}
+                slug={detail.selectedGameAwayPlayerSlug}
+              />
             </small>
           </article>
           <article className={METRIC_CARD_CLASSES}>
@@ -181,8 +214,18 @@ async function MatchDetailBody({ source, matchId }: { source: MatchSource; match
                 <thead>
                   <tr>
                     <th>Set</th>
-                    <th>{detail.selectedGameHomePlayer ?? "Home"}</th>
-                    <th>{detail.selectedGameAwayPlayer ?? "Away"}</th>
+                    <th>
+                      <PlayerSlugLink
+                        name={detail.selectedGameHomePlayer}
+                        slug={detail.selectedGameHomePlayerSlug}
+                      />
+                    </th>
+                    <th>
+                      <PlayerSlugLink
+                        name={detail.selectedGameAwayPlayer}
+                        slug={detail.selectedGameAwayPlayerSlug}
+                      />
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
@@ -249,7 +292,8 @@ async function MatchDetailBody({ source, matchId }: { source: MatchSource; match
         <article className={METRIC_CARD_CLASSES}>
           <span className="font-mono text-xs uppercase tracking-[0.08em] text-slate-500">Match</span>
           <strong className="text-lg leading-tight text-slate-900">
-            {detail.playerAName ?? "Player A"} vs {detail.playerXName ?? "Player X"}
+            <PlayerSlugLink name={detail.playerAName} slug={detail.playerASlug} /> vs{" "}
+            <PlayerSlugLink name={detail.playerXName} slug={detail.playerXSlug} />
           </strong>
           <small className="text-sm text-slate-600">
             Sets {detail.finalSetsA ?? "-"}:{detail.finalSetsX ?? "-"}
@@ -281,10 +325,14 @@ async function MatchDetailBody({ source, matchId }: { source: MatchSource; match
             <strong>Winner side:</strong> {detail.winnerInferred ?? "-"}
           </div>
           <div>
-            <strong>Player A:</strong> {detail.playerAName ?? "-"} ({detail.playerAAssociation ?? "-"})
+            <strong>Player A:</strong>{" "}
+            <PlayerSlugLink name={detail.playerAName} slug={detail.playerASlug} /> (
+            {detail.playerAAssociation ?? "-"})
           </div>
           <div>
-            <strong>Player X:</strong> {detail.playerXName ?? "-"} ({detail.playerXAssociation ?? "-"})
+            <strong>Player X:</strong>{" "}
+            <PlayerSlugLink name={detail.playerXName} slug={detail.playerXSlug} /> (
+            {detail.playerXAssociation ?? "-"})
           </div>
           <div>
             <strong>Tournament:</strong> {detail.tournament ?? "-"} | <strong>Event:</strong>{" "}
@@ -303,8 +351,12 @@ async function MatchDetailBody({ source, matchId }: { source: MatchSource; match
               <thead>
                 <tr>
                   <th>Game</th>
-                  <th>{detail.playerAName ?? "Player A"}</th>
-                  <th>{detail.playerXName ?? "Player X"}</th>
+                  <th>
+                    <PlayerSlugLink name={detail.playerAName} slug={detail.playerASlug} />
+                  </th>
+                  <th>
+                    <PlayerSlugLink name={detail.playerXName} slug={detail.playerXSlug} />
+                  </th>
                 </tr>
               </thead>
               <tbody>
