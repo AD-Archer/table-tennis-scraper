@@ -1,63 +1,43 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
 
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
 
-# Virtual environments
-venv/
-ENV/
-env/
-.venv
+# testing
+/coverage
 
-# IDEs
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
+# next.js
+/.next*
+/out/
+data
 
-# Linters and formatters
-.ruff_cache/
-.pytest_cache/
-.mypy_cache/
-.coverage
-htmlcov/
+# production
+/build
 
-# Logs
-*.log
-
-# OS
+# misc
 .DS_Store
-Thumbs.db
-*.db
-# Project specific
-# ttbl_data_backup_*/
-scraper.log
-scraper_py.log
+*.pem
 
-# Data files (comment out if you want to track data)
-ttbl_data*/
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
 
- 
-# ITTF/WTT generated artifacts
-ITTF/WTT/artifacts/
-ITTF/WTT/data/
-ITTF/WTT/logs/
-!api/data/
+# env files (can opt-in for committing if needed)
+.env*
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+package-lock.json
