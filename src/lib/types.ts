@@ -12,6 +12,18 @@ export interface TTBLGameRecord {
   isYouth?: boolean;
   gameState: string;
   winnerSide: "Home" | "Away" | null;
+  homeSets?: number | null;
+  awaySets?: number | null;
+  set1HomeScore?: number | null;
+  set1AwayScore?: number | null;
+  set2HomeScore?: number | null;
+  set2AwayScore?: number | null;
+  set3HomeScore?: number | null;
+  set3AwayScore?: number | null;
+  set4HomeScore?: number | null;
+  set4AwayScore?: number | null;
+  set5HomeScore?: number | null;
+  set5AwayScore?: number | null;
   homePlayer: TTBLPlayerRef;
   awayPlayer: TTBLPlayerRef;
 }

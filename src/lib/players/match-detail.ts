@@ -73,10 +73,89 @@ export interface WTTMatchDetail {
 }
 
 export type PlayerMatchDetail = TTBLMatchDetail | WTTMatchDetail;
+const TTBL_LIVE_MATCH_ENDPOINT = "https://www.ttbl.de/api/internal/match";
 
 interface ParsedTTBLMatchRef {
   matchId: string;
   gameIndex: number | null;
+}
+
+interface TTBLLiveGamePayload {
+  index?: number;
+  gameState?: string;
+  winnerSide?: "Home" | "Away" | null;
+  homeDouble?: { id?: string } | null;
+  awayDouble?: { id?: string } | null;
+  homeSets?: number | null;
+  awaySets?: number | null;
+  set1HomeScore?: number | null;
+  set1AwayScore?: number | null;
+  set2HomeScore?: number | null;
+  set2AwayScore?: number | null;
+  set3HomeScore?: number | null;
+  set3AwayScore?: number | null;
+  set4HomeScore?: number | null;
+  set4AwayScore?: number | null;
+  set5HomeScore?: number | null;
+  set5AwayScore?: number | null;
+}
+
+interface TTBLLiveMatchPayload {
+  id?: string;
+  homeGameWins?: number | null;
+  awayGameWins?: number | null;
+  homeSetWins?: number | null;
+  awaySetWins?: number | null;
+  games?: TTBLLiveGamePayload[];
+}
+
+interface TTBLGameRowCompat {
+  matchId: string;
+  gameday: string;
+  timestampMs: bigint;
+  gameIndex: number;
+  format: string | null;
+  isYouth: boolean;
+  gameState: string;
+  winnerSide: string | null;
+  homeSets?: number | null;
+  awaySets?: number | null;
+  set1HomeScore?: number | null;
+  set1AwayScore?: number | null;
+  set2HomeScore?: number | null;
+  set2AwayScore?: number | null;
+  set3HomeScore?: number | null;
+  set3AwayScore?: number | null;
+  set4HomeScore?: number | null;
+  set4AwayScore?: number | null;
+  set5HomeScore?: number | null;
+  set5AwayScore?: number | null;
+  homePlayerId: string | null;
+  homePlayerName: string | null;
+  awayPlayerId: string | null;
+  awayPlayerName: string | null;
+}
+
+interface TTBLMatchRowCompat {
+  id: string;
+  season: string;
+  gameday: string;
+  timestampMs: bigint;
+  matchState: string;
+  isYouth: boolean;
+  homeTeamId: string | null;
+  homeTeamName: string | null;
+  homeTeamRank: number | null;
+  homeGameWins: number | null;
+  homeSetWins: number | null;
+  awayTeamId: string | null;
+  awayTeamName: string | null;
+  awayTeamRank: number | null;
+  awayGameWins: number | null;
+  awaySetWins: number | null;
+  gamesCount: number;
+  venue: string | null;
+  games: TTBLGameRowCompat[];
 }
 
 function parseTTBLMatchReference(value: string): ParsedTTBLMatchRef {
@@ -155,6 +234,78 @@ function toIsoFromYear(value: string | null): string | null {
   return new Date(Date.UTC(parsed, 0, 1)).toISOString();
 }
 
+function toNullableInt(value: number | null | undefined): number | null {
+  if (!Number.isFinite(value)) {
+    return null;
+  }
+
+  return Math.trunc(value as number);
+}
+
+function buildTTBLSetScoresFromDbGame(game: {
+  set1HomeScore?: number | null;
+  set1AwayScore?: number | null;
+  set2HomeScore?: number | null;
+  set2AwayScore?: number | null;
+  set3HomeScore?: number | null;
+  set3AwayScore?: number | null;
+  set4HomeScore?: number | null;
+  set4AwayScore?: number | null;
+  set5HomeScore?: number | null;
+  set5AwayScore?: number | null;
+}): TTBLGameSetScore[] {
+  const rows: TTBLGameSetScore[] = [];
+
+  const values: Array<[number, number | null | undefined, number | null | undefined]> = [
+    [1, game.set1HomeScore, game.set1AwayScore],
+    [2, game.set2HomeScore, game.set2AwayScore],
+    [3, game.set3HomeScore, game.set3AwayScore],
+    [4, game.set4HomeScore, game.set4AwayScore],
+    [5, game.set5HomeScore, game.set5AwayScore],
+  ];
+
+  for (const [setNumber, homeScore, awayScore] of values) {
+    const normalizedHome = toNullableInt(homeScore);
+    const normalizedAway = toNullableInt(awayScore);
+    if (normalizedHome === null && normalizedAway === null) {
+      continue;
+    }
+
+    rows.push({
+      setNumber,
+      homeScore: normalizedHome,
+      awayScore: normalizedAway,
+    });
+  }
+
+  return rows;
+}
+
+async function fetchTTBLLiveMatchPayload(matchId: string): Promise<TTBLLiveMatchPayload | null> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 6000);
+
+  try {
+    const response = await fetch(`${TTBL_LIVE_MATCH_ENDPOINT}/${encodeURIComponent(matchId)}`, {
+      headers: {
+        "user-agent": "TTBL-NextJS-Scraper/1.0",
+      },
+      cache: "no-store",
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    return (await response.json()) as TTBLLiveMatchPayload;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 async function getTTBLMatchDetail(requestedMatchId: string): Promise<TTBLMatchDetail> {
   const parsed = parseTTBLMatchReference(requestedMatchId);
   const slugBySourceKey = await buildSlugBySourceKey();
@@ -200,23 +351,148 @@ async function getTTBLMatchDetail(requestedMatchId: string): Promise<TTBLMatchDe
     throw new Error("DATABASE_URL is required in Postgres mode.");
   }
 
-  const match = await prisma.ttblMatch.findUnique({
-    where: { id: parsed.matchId },
-    include: {
-      games: {
-        orderBy: { gameIndex: "asc" },
+  const gameSelectWithScores = {
+    matchId: true,
+    gameday: true,
+    timestampMs: true,
+    gameIndex: true,
+    format: true,
+    isYouth: true,
+    gameState: true,
+    winnerSide: true,
+    homeSets: true,
+    awaySets: true,
+    set1HomeScore: true,
+    set1AwayScore: true,
+    set2HomeScore: true,
+    set2AwayScore: true,
+    set3HomeScore: true,
+    set3AwayScore: true,
+    set4HomeScore: true,
+    set4AwayScore: true,
+    set5HomeScore: true,
+    set5AwayScore: true,
+    homePlayerId: true,
+    homePlayerName: true,
+    awayPlayerId: true,
+    awayPlayerName: true,
+  } as const;
+
+  const gameSelectLegacy = {
+    matchId: true,
+    gameday: true,
+    timestampMs: true,
+    gameIndex: true,
+    format: true,
+    isYouth: true,
+    gameState: true,
+    winnerSide: true,
+    homePlayerId: true,
+    homePlayerName: true,
+    awayPlayerId: true,
+    awayPlayerName: true,
+  } as const;
+
+  let match: TTBLMatchRowCompat | null = null;
+
+  try {
+    match = (await prisma.ttblMatch.findUnique({
+      where: { id: parsed.matchId },
+      include: {
+        games: {
+          orderBy: { gameIndex: "asc" },
+          select: gameSelectWithScores,
+        },
       },
-    },
-  });
+    })) as TTBLMatchRowCompat | null;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    if (!/set\d(home|away)score|homesets|awaysets|column/i.test(message)) {
+      throw error;
+    }
+
+    match = (await prisma.ttblMatch.findUnique({
+      where: { id: parsed.matchId },
+      include: {
+        games: {
+          orderBy: { gameIndex: "asc" },
+          select: gameSelectLegacy,
+        },
+      },
+    })) as TTBLMatchRowCompat | null;
+  }
 
   if (!match) {
     return baseDetail;
   }
 
+  const matchGames = match.games ?? [];
+
   const selectedGame =
     parsed.gameIndex !== null
-      ? match.games.find((row) => row.gameIndex === parsed.gameIndex) ?? null
-      : match.games[0] ?? null;
+      ? matchGames.find((row) => row.gameIndex === parsed.gameIndex) ?? null
+      : matchGames[0] ?? null;
+  const liveMatch = await fetchTTBLLiveMatchPayload(parsed.matchId);
+  const liveGames = liveMatch?.games ?? [];
+  const liveSelectedGame =
+    parsed.gameIndex !== null
+      ? liveGames.find((row) => (toNullableInt(row.index) ?? 0) === parsed.gameIndex) ?? null
+      : liveGames[0] ?? null;
+
+  const finishedSinglesGames = matchGames.filter(
+    (row) =>
+      (row.format === null || row.format === "singles") && row.gameState === "Finished",
+  );
+  const derivedHomeGameWins = finishedSinglesGames.filter((row) => row.winnerSide === "Home").length;
+  const derivedAwayGameWins = finishedSinglesGames.filter((row) => row.winnerSide === "Away").length;
+  const derivedHomeSetWins = finishedSinglesGames.reduce(
+    (sum, row) => sum + (toNullableInt(row.homeSets) ?? 0),
+    0,
+  );
+  const derivedAwaySetWins = finishedSinglesGames.reduce(
+    (sum, row) => sum + (toNullableInt(row.awaySets) ?? 0),
+    0,
+  );
+
+  const liveFinishedSinglesGames = liveGames.filter(
+    (row) => !row.homeDouble && !row.awayDouble && row.gameState === "Finished",
+  );
+  const derivedLiveHomeGameWins = liveFinishedSinglesGames.filter(
+    (row) => row.winnerSide === "Home",
+  ).length;
+  const derivedLiveAwayGameWins = liveFinishedSinglesGames.filter(
+    (row) => row.winnerSide === "Away",
+  ).length;
+  const derivedLiveHomeSetWins = liveFinishedSinglesGames.reduce(
+    (sum, row) => sum + (toNullableInt(row.homeSets) ?? 0),
+    0,
+  );
+  const derivedLiveAwaySetWins = liveFinishedSinglesGames.reduce(
+    (sum, row) => sum + (toNullableInt(row.awaySets) ?? 0),
+    0,
+  );
+
+  const liveHomeGameWins = toNullableInt(liveMatch?.homeGameWins);
+  const liveAwayGameWins = toNullableInt(liveMatch?.awayGameWins);
+  const liveHomeSetWins = toNullableInt(liveMatch?.homeSetWins);
+  const liveAwaySetWins = toNullableInt(liveMatch?.awaySetWins);
+
+  const homeTeamGames = toNullableInt(match.homeGameWins) ?? derivedHomeGameWins;
+  const awayTeamGames = toNullableInt(match.awayGameWins) ?? derivedAwayGameWins;
+  const homeTeamSets =
+    toNullableInt(match.homeSetWins) ??
+    (derivedHomeSetWins > 0
+      ? derivedHomeSetWins
+      : liveHomeSetWins ?? derivedLiveHomeSetWins);
+  const awayTeamSets =
+    toNullableInt(match.awaySetWins) ??
+    (derivedAwaySetWins > 0
+      ? derivedAwaySetWins
+      : liveAwaySetWins ?? derivedLiveAwaySetWins);
+  const resolvedHomeTeamGames =
+    homeTeamGames > 0 ? homeTeamGames : liveHomeGameWins ?? derivedLiveHomeGameWins;
+  const resolvedAwayTeamGames =
+    awayTeamGames > 0 ? awayTeamGames : liveAwayGameWins ?? derivedLiveAwayGameWins;
 
   const summary: TTBLMatchSummary = {
     matchId: match.id,
@@ -228,15 +504,15 @@ async function getTTBLMatchDetail(requestedMatchId: string): Promise<TTBLMatchDe
       id: match.homeTeamId ?? "",
       name: match.homeTeamName ?? "Unknown",
       rank: match.homeTeamRank ?? 0,
-      gameWins: match.homeGameWins ?? 0,
-      setWins: match.homeSetWins ?? 0,
+      gameWins: resolvedHomeTeamGames,
+      setWins: homeTeamSets,
     },
     awayTeam: {
       id: match.awayTeamId ?? "",
       name: match.awayTeamName ?? "Unknown",
       rank: match.awayTeamRank ?? 0,
-      gameWins: match.awayGameWins ?? 0,
-      setWins: match.awaySetWins ?? 0,
+      gameWins: resolvedAwayTeamGames,
+      setWins: awayTeamSets,
     },
     gamesCount: match.gamesCount,
     venue: match.venue ?? "Unknown",
@@ -252,6 +528,18 @@ async function getTTBLMatchDetail(requestedMatchId: string): Promise<TTBLMatchDe
         isYouth: selectedGame.isYouth,
         gameState: selectedGame.gameState,
         winnerSide: selectedGame.winnerSide === "Home" || selectedGame.winnerSide === "Away" ? selectedGame.winnerSide : null,
+        homeSets: toNullableInt(selectedGame.homeSets),
+        awaySets: toNullableInt(selectedGame.awaySets),
+        set1HomeScore: toNullableInt(selectedGame.set1HomeScore),
+        set1AwayScore: toNullableInt(selectedGame.set1AwayScore),
+        set2HomeScore: toNullableInt(selectedGame.set2HomeScore),
+        set2AwayScore: toNullableInt(selectedGame.set2AwayScore),
+        set3HomeScore: toNullableInt(selectedGame.set3HomeScore),
+        set3AwayScore: toNullableInt(selectedGame.set3AwayScore),
+        set4HomeScore: toNullableInt(selectedGame.set4HomeScore),
+        set4AwayScore: toNullableInt(selectedGame.set4AwayScore),
+        set5HomeScore: toNullableInt(selectedGame.set5HomeScore),
+        set5AwayScore: toNullableInt(selectedGame.set5AwayScore),
         homePlayer: {
           id: selectedGame.homePlayerId,
           name: selectedGame.homePlayerName ?? "Unknown",
@@ -276,10 +564,10 @@ async function getTTBLMatchDetail(requestedMatchId: string): Promise<TTBLMatchDe
     matchState: match.matchState,
     homeTeamName: match.homeTeamName,
     awayTeamName: match.awayTeamName,
-    homeTeamGames: match.homeGameWins,
-    awayTeamGames: match.awayGameWins,
-    homeTeamSets: match.homeSetWins,
-    awayTeamSets: match.awaySetWins,
+    homeTeamGames: resolvedHomeTeamGames,
+    awayTeamGames: resolvedAwayTeamGames,
+    homeTeamSets,
+    awayTeamSets,
     selectedGameIndex: selectedGame?.gameIndex ?? parsed.gameIndex,
     selectedGameState: selectedGame?.gameState ?? null,
     selectedGameWinnerSide:
@@ -294,9 +582,18 @@ async function getTTBLMatchDetail(requestedMatchId: string): Promise<TTBLMatchDe
     selectedGameAwayPlayerSlug: selectedGame?.awayPlayerId
       ? slugBySourceKey.get(`ttbl:${selectedGame.awayPlayerId}`) ?? null
       : null,
-    selectedGameHomeSets: null,
-    selectedGameAwaySets: null,
-    selectedGameSetScores: [],
+    selectedGameHomeSets:
+      (selectedGame ? toNullableInt(selectedGame.homeSets) : null) ??
+      (liveSelectedGame ? toNullableInt(liveSelectedGame.homeSets) : null),
+    selectedGameAwaySets:
+      (selectedGame ? toNullableInt(selectedGame.awaySets) : null) ??
+      (liveSelectedGame ? toNullableInt(liveSelectedGame.awaySets) : null),
+    selectedGameSetScores:
+      selectedGame && buildTTBLSetScoresFromDbGame(selectedGame).length > 0
+        ? buildTTBLSetScoresFromDbGame(selectedGame)
+        : liveSelectedGame
+          ? buildTTBLSetScoresFromDbGame(liveSelectedGame)
+          : [],
     summary,
     gameStats,
     match: {
@@ -308,12 +605,28 @@ async function getTTBLMatchDetail(requestedMatchId: string): Promise<TTBLMatchDe
       timestamp: Number(match.timestampMs),
       homeTeam: match.homeTeamName,
       awayTeam: match.awayTeamName,
+      homeGameWins: resolvedHomeTeamGames,
+      awayGameWins: resolvedAwayTeamGames,
+      homeSetWins: homeTeamSets,
+      awaySetWins: awayTeamSets,
     },
     selectedGame: selectedGame
       ? {
           index: selectedGame.gameIndex,
           gameState: selectedGame.gameState,
           winnerSide: selectedGame.winnerSide,
+          homeSets: toNullableInt(selectedGame.homeSets),
+          awaySets: toNullableInt(selectedGame.awaySets),
+          set1HomeScore: toNullableInt(selectedGame.set1HomeScore),
+          set1AwayScore: toNullableInt(selectedGame.set1AwayScore),
+          set2HomeScore: toNullableInt(selectedGame.set2HomeScore),
+          set2AwayScore: toNullableInt(selectedGame.set2AwayScore),
+          set3HomeScore: toNullableInt(selectedGame.set3HomeScore),
+          set3AwayScore: toNullableInt(selectedGame.set3AwayScore),
+          set4HomeScore: toNullableInt(selectedGame.set4HomeScore),
+          set4AwayScore: toNullableInt(selectedGame.set4AwayScore),
+          set5HomeScore: toNullableInt(selectedGame.set5HomeScore),
+          set5AwayScore: toNullableInt(selectedGame.set5AwayScore),
           homePlayer: selectedGame.homePlayerName,
           awayPlayer: selectedGame.awayPlayerName,
         }

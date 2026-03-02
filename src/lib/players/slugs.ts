@@ -66,6 +66,87 @@ function toSortableTimestamp(iso: string | null): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function toNullableInt(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.trunc(value);
+  }
+
+  if (typeof value === "bigint") {
+    return Number(value);
+  }
+
+  return null;
+}
+
+type TTBLScoreSource = {
+  homeSets?: number | null;
+  awaySets?: number | null;
+  set1HomeScore?: number | null;
+  set1AwayScore?: number | null;
+  set2HomeScore?: number | null;
+  set2AwayScore?: number | null;
+  set3HomeScore?: number | null;
+  set3AwayScore?: number | null;
+  set4HomeScore?: number | null;
+  set4AwayScore?: number | null;
+  set5HomeScore?: number | null;
+  set5AwayScore?: number | null;
+};
+
+type TTBLGameRowCompat = TTBLScoreSource & {
+  matchId: string;
+  gameIndex: number;
+  season: string;
+  gameday: string;
+  timestampMs: bigint;
+  winnerSide: string | null;
+  format: string | null;
+  homePlayerId: string | null;
+  homePlayerName: string | null;
+  awayPlayerId: string | null;
+  awayPlayerName: string | null;
+};
+
+function deriveTTBLSets(game: TTBLScoreSource): { home: number; away: number } | null {
+  const homeSets = toNullableInt(game.homeSets);
+  const awaySets = toNullableInt(game.awaySets);
+  if (homeSets !== null && awaySets !== null) {
+    return { home: homeSets, away: awaySets };
+  }
+
+  const setRows: Array<[number | null | undefined, number | null | undefined]> = [
+    [game.set1HomeScore, game.set1AwayScore],
+    [game.set2HomeScore, game.set2AwayScore],
+    [game.set3HomeScore, game.set3AwayScore],
+    [game.set4HomeScore, game.set4AwayScore],
+    [game.set5HomeScore, game.set5AwayScore],
+  ];
+
+  let derivedHome = 0;
+  let derivedAway = 0;
+  let foundSetScore = false;
+  for (const [homeScoreRaw, awayScoreRaw] of setRows) {
+    const homeScore = toNullableInt(homeScoreRaw);
+    const awayScore = toNullableInt(awayScoreRaw);
+    if (homeScore === null || awayScore === null) {
+      continue;
+    }
+
+    foundSetScore = true;
+    if (homeScore > awayScore) {
+      derivedHome += 1;
+    } else if (awayScore > homeScore) {
+      derivedAway += 1;
+    }
+  }
+
+  if (!foundSetScore) {
+    return null;
+  }
+
+  return { home: derivedHome, away: derivedAway };
+}
+
 function pushUniqueRecentMatches(
   source: PlayerSlugMatchEntry[],
   incoming: PlayerSlugMatchEntry[],
@@ -148,27 +229,70 @@ async function collectTTBLAggregates(): Promise<Map<string, TTBLAggregate>> {
     return new Map();
   }
 
-  const games = await prisma.ttblGame.findMany({
-    where: {
-      isYouth: false,
-      gameState: "Finished",
-      homePlayerId: { not: null },
-      awayPlayerId: { not: null },
-    },
-    select: {
-      matchId: true,
-      gameIndex: true,
-      season: true,
-      gameday: true,
-      timestampMs: true,
-      winnerSide: true,
-      format: true,
-      homePlayerId: true,
-      homePlayerName: true,
-      awayPlayerId: true,
-      awayPlayerName: true,
-    },
-  });
+  const where = {
+    isYouth: false,
+    gameState: "Finished",
+    homePlayerId: { not: null },
+    awayPlayerId: { not: null },
+  } as const;
+
+  const selectWithScores = {
+    matchId: true,
+    gameIndex: true,
+    season: true,
+    gameday: true,
+    timestampMs: true,
+    winnerSide: true,
+    format: true,
+    homePlayerId: true,
+    homePlayerName: true,
+    awayPlayerId: true,
+    awayPlayerName: true,
+    homeSets: true,
+    awaySets: true,
+    set1HomeScore: true,
+    set1AwayScore: true,
+    set2HomeScore: true,
+    set2AwayScore: true,
+    set3HomeScore: true,
+    set3AwayScore: true,
+    set4HomeScore: true,
+    set4AwayScore: true,
+    set5HomeScore: true,
+    set5AwayScore: true,
+  } as const;
+
+  const selectLegacy = {
+    matchId: true,
+    gameIndex: true,
+    season: true,
+    gameday: true,
+    timestampMs: true,
+    winnerSide: true,
+    format: true,
+    homePlayerId: true,
+    homePlayerName: true,
+    awayPlayerId: true,
+    awayPlayerName: true,
+  } as const;
+
+  let games: TTBLGameRowCompat[] = [];
+  try {
+    games = (await prisma.ttblGame.findMany({
+      where,
+      select: selectWithScores,
+    })) as TTBLGameRowCompat[];
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    if (!/set\d(home|away)score|homesets|awaysets|column/i.test(message)) {
+      throw error;
+    }
+
+    games = (await prisma.ttblGame.findMany({
+      where,
+      select: selectLegacy,
+    })) as TTBLGameRowCompat[];
+  }
 
   const map = new Map<string, TTBLAggregate>();
 
@@ -184,6 +308,9 @@ async function collectTTBLAggregates(): Promise<Map<string, TTBLAggregate>> {
     }
 
     const occurredAt = toIsoFromUnixSeconds(Number(game.timestampMs));
+    const sets = deriveTTBLSets(game);
+    const homeScore = sets ? `${sets.home}-${sets.away}` : null;
+    const awayScore = sets ? `${sets.away}-${sets.home}` : null;
 
     const home = map.get(homeId) ?? {
       matchesPlayed: 0,
@@ -210,7 +337,7 @@ async function collectTTBLAggregates(): Promise<Map<string, TTBLAggregate>> {
         event: game.gameday,
         opponent: game.awayPlayerName,
         opponentSourceId: awayId,
-        score: null,
+        score: homeScore,
         outcome:
           game.winnerSide === "Home" ? "W" : game.winnerSide === "Away" ? "L" : null,
       },
@@ -242,7 +369,7 @@ async function collectTTBLAggregates(): Promise<Map<string, TTBLAggregate>> {
         event: game.gameday,
         opponent: game.homePlayerName,
         opponentSourceId: homeId,
-        score: null,
+        score: awayScore,
         outcome:
           game.winnerSide === "Away" ? "W" : game.winnerSide === "Home" ? "L" : null,
       },

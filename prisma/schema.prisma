@@ -99,6 +99,18 @@ model TtblGame {
   isYouth        Boolean  @default(false)
   gameState      String
   winnerSide     String?
+  homeSets       Int?
+  awaySets       Int?
+  set1HomeScore  Int?
+  set1AwayScore  Int?
+  set2HomeScore  Int?
+  set2AwayScore  Int?
+  set3HomeScore  Int?
+  set3AwayScore  Int?
+  set4HomeScore  Int?
+  set4AwayScore  Int?
+  set5HomeScore  Int?
+  set5AwayScore  Int?
   homePlayerId   String?
   homePlayerName String?
   awayPlayerId   String?

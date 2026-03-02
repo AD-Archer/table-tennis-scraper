@@ -109,6 +109,18 @@ interface TTBLRawGame {
   index?: number;
   gameState?: string;
   winnerSide?: "Home" | "Away" | null;
+  homeSets?: number | null;
+  awaySets?: number | null;
+  set1HomeScore?: number | null;
+  set1AwayScore?: number | null;
+  set2HomeScore?: number | null;
+  set2AwayScore?: number | null;
+  set3HomeScore?: number | null;
+  set3AwayScore?: number | null;
+  set4HomeScore?: number | null;
+  set4AwayScore?: number | null;
+  set5HomeScore?: number | null;
+  set5AwayScore?: number | null;
   homePlayer?: TTBLRawPlayer | null;
   awayPlayer?: TTBLRawPlayer | null;
   homeLeaguePlayer?: TTBLRawPlayer | null;
@@ -265,6 +277,14 @@ function throwIfAborted(signal?: AbortSignal): void {
       ? signal.reason
       : "Cancelled";
   throw new Error(reason);
+}
+
+function toFiniteInt(value: number | null | undefined): number | null {
+  if (!Number.isFinite(value)) {
+    return null;
+  }
+
+  return Math.trunc(value as number);
 }
 
 async function fetchTextWithSignal(url: string, signal?: AbortSignal): Promise<string> {
@@ -526,6 +546,18 @@ export async function scrapeTTBLSeason(
           isYouth,
           gameState: game.gameState ?? "Unknown",
           winnerSide: game.winnerSide ?? null,
+          homeSets: toFiniteInt(game.homeSets),
+          awaySets: toFiniteInt(game.awaySets),
+          set1HomeScore: toFiniteInt(game.set1HomeScore),
+          set1AwayScore: toFiniteInt(game.set1AwayScore),
+          set2HomeScore: toFiniteInt(game.set2HomeScore),
+          set2AwayScore: toFiniteInt(game.set2AwayScore),
+          set3HomeScore: toFiniteInt(game.set3HomeScore),
+          set3AwayScore: toFiniteInt(game.set3AwayScore),
+          set4HomeScore: toFiniteInt(game.set4HomeScore),
+          set4AwayScore: toFiniteInt(game.set4AwayScore),
+          set5HomeScore: toFiniteInt(game.set5HomeScore),
+          set5AwayScore: toFiniteInt(game.set5AwayScore),
           homePlayer: { id: homePlayerId, name: homePlayerName },
           awayPlayer: { id: awayPlayerId, name: awayPlayerName },
         });
@@ -598,6 +630,18 @@ export async function scrapeTTBLSeason(
         }
       }
 
+      const finishedSinglesGames = singlesGames.filter((game) => game.gameState === "Finished");
+      const derivedHomeGameWins = finishedSinglesGames.filter((game) => game.winnerSide === "Home").length;
+      const derivedAwayGameWins = finishedSinglesGames.filter((game) => game.winnerSide === "Away").length;
+      const derivedHomeSetWins = finishedSinglesGames.reduce(
+        (sum, game) => sum + (toFiniteInt(game.homeSets) ?? 0),
+        0,
+      );
+      const derivedAwaySetWins = finishedSinglesGames.reduce(
+        (sum, game) => sum + (toFiniteInt(game.awaySets) ?? 0),
+        0,
+      );
+
       matchSummaries.push({
         matchId: rawMatch.id ?? matchId,
         matchState: rawMatch.matchState ?? "Unknown",
@@ -608,15 +652,15 @@ export async function scrapeTTBLSeason(
           id: rawMatch.homeTeam?.id ?? "",
           name: rawMatch.homeTeam?.name ?? "Unknown",
           rank: rawMatch.homeTeam?.rank ?? 0,
-          gameWins: rawMatch.homeGameWins ?? 0,
-          setWins: rawMatch.homeSetWins ?? 0,
+          gameWins: toFiniteInt(rawMatch.homeGameWins) ?? derivedHomeGameWins,
+          setWins: toFiniteInt(rawMatch.homeSetWins) ?? derivedHomeSetWins,
         },
         awayTeam: {
           id: rawMatch.awayTeam?.id ?? "",
           name: rawMatch.awayTeam?.name ?? "Unknown",
           rank: rawMatch.awayTeam?.rank ?? 0,
-          gameWins: rawMatch.awayGameWins ?? 0,
-          setWins: rawMatch.awaySetWins ?? 0,
+          gameWins: toFiniteInt(rawMatch.awayGameWins) ?? derivedAwayGameWins,
+          setWins: toFiniteInt(rawMatch.awaySetWins) ?? derivedAwaySetWins,
         },
         gamesCount: singlesGames.length,
         venue: rawMatch.venue?.name ?? "Unknown",

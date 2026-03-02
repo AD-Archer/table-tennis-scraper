@@ -310,7 +310,7 @@ async function buildDatasetSnapshot(): Promise<DatasetSnapshot> {
     };
   }
 
-  const [ttblRows, wttRows] = await Promise.all([
+  const [ttblRows, ttblGameRows, wttRows] = await Promise.all([
     prisma.ttblMatch.findMany({
       where: { isYouth: false },
       select: {
@@ -324,6 +324,17 @@ async function buildDatasetSnapshot(): Promise<DatasetSnapshot> {
         awayTeamName: true,
         homeGameWins: true,
         awayGameWins: true,
+      },
+    }),
+    prisma.ttblGame.findMany({
+      where: {
+        isYouth: false,
+        gameState: "Finished",
+      },
+      select: {
+        matchId: true,
+        format: true,
+        winnerSide: true,
       },
     }),
     prisma.wttMatch.findMany({
@@ -353,6 +364,20 @@ async function buildDatasetSnapshot(): Promise<DatasetSnapshot> {
     (max, row) => Math.max(max, parseSeasonStart(row.season)),
     0,
   );
+  const ttblDerivedScoreByMatchId = new Map<string, { home: number; away: number }>();
+  for (const row of ttblGameRows) {
+    if (row.format === "doubles") {
+      continue;
+    }
+
+    const existing = ttblDerivedScoreByMatchId.get(row.matchId) ?? { home: 0, away: 0 };
+    if (row.winnerSide === "Home") {
+      existing.home += 1;
+    } else if (row.winnerSide === "Away") {
+      existing.away += 1;
+    }
+    ttblDerivedScoreByMatchId.set(row.matchId, existing);
+  }
 
   for (const row of ttblRows) {
     const seasonStart = parseSeasonStart(row.season);
@@ -365,6 +390,14 @@ async function buildDatasetSnapshot(): Promise<DatasetSnapshot> {
     );
     const ongoing = /(live|running|ongoing|inprogress|active)/.test(normalizedState);
     const notFinished = normalizedState !== "finished" && !preMatch;
+
+    const derivedScore = ttblDerivedScoreByMatchId.get(row.id) ?? null;
+    const homeScore = Number.isFinite(row.homeGameWins)
+      ? row.homeGameWins
+      : (derivedScore?.home ?? null);
+    const awayScore = Number.isFinite(row.awayGameWins)
+      ? row.awayGameWins
+      : (derivedScore?.away ?? null);
 
     matches.push({
       source: "ttbl",
@@ -380,10 +413,7 @@ async function buildDatasetSnapshot(): Promise<DatasetSnapshot> {
       event: row.gameday ?? null,
       homeOrPlayerA: row.homeTeamName ?? null,
       awayOrPlayerX: row.awayTeamName ?? null,
-      score:
-        Number.isFinite(row.homeGameWins) && Number.isFinite(row.awayGameWins)
-          ? `${row.homeGameWins}-${row.awayGameWins}`
-          : null,
+      score: Number.isFinite(homeScore) && Number.isFinite(awayScore) ? `${homeScore}-${awayScore}` : null,
     });
   }
 

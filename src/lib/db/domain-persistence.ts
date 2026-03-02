@@ -229,6 +229,18 @@ export async function persistTTBLSnapshotToDb(input: TTBLSnapshotInput): Promise
     isYouth: Boolean(game.isYouth),
     gameState: game.gameState,
     winnerSide: game.winnerSide ?? null,
+    homeSets: Number.isFinite(game.homeSets) ? (game.homeSets as number) : null,
+    awaySets: Number.isFinite(game.awaySets) ? (game.awaySets as number) : null,
+    set1HomeScore: Number.isFinite(game.set1HomeScore) ? (game.set1HomeScore as number) : null,
+    set1AwayScore: Number.isFinite(game.set1AwayScore) ? (game.set1AwayScore as number) : null,
+    set2HomeScore: Number.isFinite(game.set2HomeScore) ? (game.set2HomeScore as number) : null,
+    set2AwayScore: Number.isFinite(game.set2AwayScore) ? (game.set2AwayScore as number) : null,
+    set3HomeScore: Number.isFinite(game.set3HomeScore) ? (game.set3HomeScore as number) : null,
+    set3AwayScore: Number.isFinite(game.set3AwayScore) ? (game.set3AwayScore as number) : null,
+    set4HomeScore: Number.isFinite(game.set4HomeScore) ? (game.set4HomeScore as number) : null,
+    set4AwayScore: Number.isFinite(game.set4AwayScore) ? (game.set4AwayScore as number) : null,
+    set5HomeScore: Number.isFinite(game.set5HomeScore) ? (game.set5HomeScore as number) : null,
+    set5AwayScore: Number.isFinite(game.set5AwayScore) ? (game.set5AwayScore as number) : null,
     homePlayerId: game.homePlayer.id ?? null,
     homePlayerName: game.homePlayer.name ?? null,
     awayPlayerId: game.awayPlayer.id ?? null,
@@ -236,10 +248,43 @@ export async function persistTTBLSnapshotToDb(input: TTBLSnapshotInput): Promise
   }));
 
   for (const gameChunk of chunk(gameRows, CHUNK_SIZE)) {
-    await prisma.ttblGame.createMany({
-      data: gameChunk,
-      skipDuplicates: true,
-    });
+    try {
+      await prisma.ttblGame.createMany({
+        data: gameChunk,
+        skipDuplicates: true,
+      });
+    } catch (error) {
+      // Compatibility path for databases that have not yet applied TTBL set-score columns.
+      const message = error instanceof Error ? error.message : "";
+      if (!/set\d(home|away)score|homesets|awaysets|column/i.test(message)) {
+        throw error;
+      }
+
+      const legacyRows = gameChunk.map((row) => {
+        const legacy = { ...row } as Record<string, unknown>;
+        delete legacy.homeSets;
+        delete legacy.awaySets;
+        delete legacy.set1HomeScore;
+        delete legacy.set1AwayScore;
+        delete legacy.set2HomeScore;
+        delete legacy.set2AwayScore;
+        delete legacy.set3HomeScore;
+        delete legacy.set3AwayScore;
+        delete legacy.set4HomeScore;
+        delete legacy.set4AwayScore;
+        delete legacy.set5HomeScore;
+        delete legacy.set5AwayScore;
+        return legacy;
+      });
+
+      await prisma.ttblGame.createMany({
+        data:
+          legacyRows as unknown as NonNullable<
+            Parameters<typeof prisma.ttblGame.createMany>[0]
+          >["data"],
+        skipDuplicates: true,
+      });
+    }
   }
 
   const statRows = input.playerStatsFinal.map((row) => ({
