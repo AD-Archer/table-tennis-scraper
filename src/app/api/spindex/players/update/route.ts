@@ -1,29 +1,16 @@
 import { NextResponse } from "next/server";
 import { SpindexUpdateOptions, syncPlayersToSpindex } from "@/lib/spindex/client";
 
-interface LegacySyncBody extends SpindexUpdateOptions {
-  apiPath?: string;
-}
-
 export async function POST(request: Request) {
   try {
-    const body = (await request.json().catch(() => ({}))) as LegacySyncBody;
-    const legacyApiPath = body.apiPath?.trim() ?? "";
-    const privatePlayersPatchPath =
-      body.privatePlayersPatchPath ??
-      (legacyApiPath.includes("/players") ? legacyApiPath : undefined);
-
-    const report = await syncPlayersToSpindex({
-      ...body,
-      privatePlayersPatchPath,
-    });
+    const body = (await request.json().catch(() => ({}))) as SpindexUpdateOptions;
+    const report = await syncPlayersToSpindex(body);
     const ok = report.failedBatches === 0;
 
     return NextResponse.json(
       {
         ok,
         report,
-        mode: "players-sync",
       },
       { status: ok ? 200 : 502 },
     );

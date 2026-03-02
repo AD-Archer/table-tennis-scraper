@@ -2,11 +2,18 @@
 
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { DashboardOverview } from "@/lib/dashboard-types";
+import { DashboardOverview, EndpointRow } from "@/lib/dashboard-types";
 
 interface DashboardProps {
   initialOverview: DashboardOverview;
 }
+
+const ENDPOINT_CATEGORY_ORDER = [
+  "MCP routes (AI + debugging)",
+  "Internal API routes (lambda triggers)",
+  "Spindex routes (compare + push)",
+  "Data and utility routes",
+];
 
 type ActionJobState = "queued" | "running" | "completed" | "failed";
 
@@ -177,16 +184,13 @@ export function Dashboard({ initialOverview }: DashboardProps) {
   const [actionLogs, setActionLogs] = useState<string[]>([]);
   const [actionJobId, setActionJobId] = useState<string | null>(null);
   const [cancelBusy, setCancelBusy] = useState(false);
+  const [showCanonicalKeys, setShowCanonicalKeys] = useState(false);
 
   const actionPollTimerRef = useRef<number | null>(null);
   const appendUiLog = useCallback((message: string): void => {
     setActionLogs((prev) => [...prev, `[${new Date().toISOString()}] [UI] ${message}`]);
   }, []);
 
-  const topRegistryPlayers = useMemo(
-    () => (overview.players?.players ?? []).slice(0, 12),
-    [overview.players?.players],
-  );
   const mergeCandidates = useMemo(
     () => (overview.players?.mergeCandidates ?? []).slice(0, 16),
     [overview.players?.mergeCandidates],
@@ -240,6 +244,27 @@ export function Dashboard({ initialOverview }: DashboardProps) {
     }
     return `${sorted[0]} to ${sorted[sorted.length - 1]} (${sorted.length} years)`;
   }, [overview.wtt.years]);
+  const endpointGroups = useMemo(() => {
+    const byCategory = new Map<string, EndpointRow[]>();
+
+    for (const endpoint of overview.endpoints) {
+      const current = byCategory.get(endpoint.category) ?? [];
+      current.push(endpoint);
+      byCategory.set(endpoint.category, current);
+    }
+
+    const prioritized = ENDPOINT_CATEGORY_ORDER.filter((category) => byCategory.has(category));
+    const extras = [...byCategory.keys()]
+      .filter((category) => !ENDPOINT_CATEGORY_ORDER.includes(category))
+      .sort((a, b) => a.localeCompare(b));
+
+    return [...prioritized, ...extras].map((category) => ({
+      category,
+      endpoints: [...(byCategory.get(category) ?? [])].sort(
+        (a, b) => a.path.localeCompare(b.path) || a.method.localeCompare(b.method),
+      ),
+    }));
+  }, [overview.endpoints]);
 
   const clearActionPollTimer = useCallback((): void => {
     if (actionPollTimerRef.current !== null) {
@@ -671,7 +696,7 @@ export function Dashboard({ initialOverview }: DashboardProps) {
             </strong>
           </p>
           <button
-            className="danger-button"
+            className="btn btn-danger btn-hero"
             disabled={cancelBusy}
             onClick={onCancelActiveJob}
             type="button"
@@ -715,7 +740,7 @@ export function Dashboard({ initialOverview }: DashboardProps) {
       </section>
 
       <section className="controls-grid">
-        <form className="panel action-panel" onSubmit={onRunTTBL}>
+        <form className="panel action-panel action-panel-sync" onSubmit={onRunTTBL}>
           <h2>Scrape TTBL</h2>
           <label>
             Seasons or Start Years (CSV)
@@ -732,12 +757,12 @@ export function Dashboard({ initialOverview }: DashboardProps) {
           <p className="hint">
             Youth-tagged TTBL matches are filtered out by default.
           </p>
-          <button disabled={busyKey !== null} type="submit">
+          <button className="btn btn-primary btn-block" disabled={busyKey !== null} type="submit">
             {busyKey === "TTBL scrape" ? "Running..." : "Scrape TTBL"}
           </button>
         </form>
 
-        <form className="panel action-panel" onSubmit={onRunWTT}>
+        <form className="panel action-panel action-panel-sync" onSubmit={onRunWTT}>
           <h2>Scrape WTT</h2>
           <label>
             Years (CSV)
@@ -752,12 +777,12 @@ export function Dashboard({ initialOverview }: DashboardProps) {
             Default scope is intentionally limited for speed: current year, last 45 days, and
             max 18 events per year.
           </p>
-          <button disabled={busyKey !== null} type="submit">
+          <button className="btn btn-primary btn-block" disabled={busyKey !== null} type="submit">
             {busyKey === "WTT scrape" ? "Running..." : "Scrape WTT"}
           </button>
         </form>
 
-        <div className="panel action-panel">
+        <div className="panel action-panel action-panel-refresh">
           <h2>TTBL Full Refresh</h2>
           <p className="hint">
             Discover all available TTBL seasons and rescrape them without touching WTT files.
@@ -766,6 +791,7 @@ export function Dashboard({ initialOverview }: DashboardProps) {
             This is a weaker master sync: TTBL all-time + player registry rebuild only.
           </p>
           <button
+            className="btn btn-secondary btn-block"
             disabled={busyKey !== null}
             onClick={onRunTTBLAllTime}
             type="button"
@@ -774,7 +800,7 @@ export function Dashboard({ initialOverview }: DashboardProps) {
           </button>
         </div>
 
-        <div className="panel action-panel">
+        <div className="panel action-panel action-panel-refresh">
           <h2>WTT Full Refresh</h2>
           <p className="hint">
             Discover all available years and scrape WTT/ITTF data without touching TTBL files.
@@ -783,6 +809,7 @@ export function Dashboard({ initialOverview }: DashboardProps) {
             This is a weaker master sync: WTT all-time + player registry rebuild only, limited to men&apos;s/women&apos;s singles and youth excluded by default.
           </p>
           <button
+            className="btn btn-secondary btn-block"
             disabled={busyKey !== null}
             onClick={onRunWTTAllTime}
             type="button"
@@ -791,7 +818,7 @@ export function Dashboard({ initialOverview }: DashboardProps) {
           </button>
         </div>
 
-        <div className="panel action-panel">
+        <div className="panel action-panel action-panel-master">
           <h2>Master Sync</h2>
           <label>
             Master Password
@@ -810,6 +837,7 @@ export function Dashboard({ initialOverview }: DashboardProps) {
             Uses full-history ranges and ignores the TTBL/WTT text-box values above.
           </p>
           <button
+            className="btn btn-accent btn-block"
             disabled={busyKey !== null}
             onClick={onRunMasterSync}
             type="button"
@@ -818,14 +846,14 @@ export function Dashboard({ initialOverview }: DashboardProps) {
           </button>
         </div>
 
-        <div className="panel action-panel">
+        <div className="panel action-panel action-panel-danger">
           <h2>Data Controls</h2>
           <p className="hint">Hard reset all stored relational dataset rows.</p>
           <p className="hint">
             Uses the same master password field as Master Sync.
           </p>
           <button
-            className="danger-button"
+            className="btn btn-danger btn-block"
             disabled={busyKey !== null}
             onClick={onDestroyData}
             type="button"
@@ -836,36 +864,16 @@ export function Dashboard({ initialOverview }: DashboardProps) {
       </section>
 
       <section className="panel">
-        <h2>Player Registry (What This Means)</h2>
-        <p className="hint">
-          After every TTBL/WTT scrape, the app rebuilds a canonical player registry.
-          It groups source players under stable IDs so duplicates can be reviewed
-          before downstream sync.
-        </p>
-        <p className="hint">
-          <strong>Canonical players:</strong> {overview.players?.totals.canonicalPlayers ?? 0} |{" "}
-          <strong>Merged:</strong> {overview.players?.totals.mergedPlayers ?? 0} |{" "}
-          <strong>Merge candidates:</strong> {overview.players?.totals.candidates ?? 0}
-        </p>
-        <p className="hint">
-          Merge candidates below are unresolved/ambiguous identity cases discovered during automatic linking.
-        </p>
-        <p className="hint">
-          Trigger this from UI or from a background lambda by calling
-          <code> POST /api/players/registry</code> with <code>{`{"strict": true}`}</code>.
-          Strict mode fails the job when unresolved candidates remain.
-        </p>
-        <button
-          disabled={busyKey !== null}
-          onClick={onRefreshMergeRegistryStrict}
-          type="button"
-        >
-          {busyKey === "Merge refresh" ? "Running..." : "Refresh merge registry (strict)"}
-        </button>
-      </section>
-
-      <section className="panel">
-        <h2>Last Action Log</h2>
+        <div className="section-head">
+          <h2>Last Action Log</h2>
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={() => setShowActionLog((prev) => !prev)}
+            type="button"
+          >
+            {showActionLog ? "Hide action log" : "Show action log"}
+          </button>
+        </div>
         <p className="hint">Live logs from TTBL, WTT, WTT full refresh, merge refresh, master sync, and destroy-data runs.</p>
         <p className="hint">
           <strong>{actionLogTitle}</strong>
@@ -873,13 +881,6 @@ export function Dashboard({ initialOverview }: DashboardProps) {
         <p className="hint">
           Job ID: <code>{actionJobId ?? "-"}</code>
         </p>
-        <button
-          className="ghost-button"
-          onClick={() => setShowActionLog((prev) => !prev)}
-          type="button"
-        >
-          {showActionLog ? "Hide action log" : "Show action log"}
-        </button>
         {showActionLog ? (
           <div className="scrape-log-wrap">
             <pre className="scrape-log">
@@ -903,38 +904,49 @@ export function Dashboard({ initialOverview }: DashboardProps) {
         </div>
       </section>
 
-      <section className="data-grid">
-        <article className="panel full-width">
-          <h2>Canonical Players</h2>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Name</th>
-                  <th>Members</th>
-                  <th>Sources</th>
-                  <th>Key</th>
-                </tr>
-              </thead>
-              <tbody>
-                {topRegistryPlayers.map((player) => (
-                  <tr key={player.canonicalKey}>
-                    <td>{player.displayName}</td>
-                    <td>{player.memberCount}</td>
-                    <td>{player.sourceCount}</td>
-                    <td>
-                      <code>{player.canonicalKey}</code>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </article>
+      <section className="panel">
+        <div className="section-head">
+          <h2>Player Registry (What This Means)</h2>
+          <button
+            className="btn btn-secondary btn-sm"
+            disabled={busyKey !== null}
+            onClick={onRefreshMergeRegistryStrict}
+            type="button"
+          >
+            {busyKey === "Merge refresh" ? "Running..." : "Refresh merge registry"}
+          </button>
+        </div>
+        <p className="hint">
+          After every TTBL/WTT scrape, the app rebuilds a canonical player registry.
+          It groups source players under stable IDs so duplicates can be reviewed
+          before downstream sync.
+        </p>
+        <p className="hint">
+          <strong>Canonical players:</strong> {overview.players?.totals.canonicalPlayers ?? 0} |{" "}
+          <strong>Merged:</strong> {overview.players?.totals.mergedPlayers ?? 0} |{" "}
+          <strong>Merge candidates:</strong> {overview.players?.totals.candidates ?? 0}
+        </p>
+        <p className="hint">
+          Merge candidates below are unresolved/ambiguous identity cases discovered during automatic linking.
+        </p>
+        <p className="hint">
+          Trigger this from UI or from a background lambda by calling
+          <code> POST /api/players/registry</code> with <code>{`{"strict": true}`}</code>.
+          Strict mode fails the job when unresolved candidates remain.
+        </p>
       </section>
 
       <section className="panel">
-        <h2>Merge Candidates</h2>
+        <div className="section-head">
+          <h2>Merge Candidates</h2>
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={() => setShowCanonicalKeys((prev) => !prev)}
+            type="button"
+          >
+            {showCanonicalKeys ? "Hide canonical keys" : "Show canonical keys"}
+          </button>
+        </div>
         <div className="table-wrap">
           <table>
             <thead>
@@ -951,13 +963,21 @@ export function Dashboard({ initialOverview }: DashboardProps) {
                 >
                   <td>
                     {candidate.leftName}
-                    <br />
-                    <code>{candidate.leftCanonicalKey}</code>
+                    {showCanonicalKeys ? (
+                      <>
+                        <br />
+                        <code>{candidate.leftCanonicalKey}</code>
+                      </>
+                    ) : null}
                   </td>
                   <td>
                     {candidate.rightName}
-                    <br />
-                    <code>{candidate.rightCanonicalKey}</code>
+                    {showCanonicalKeys ? (
+                      <>
+                        <br />
+                        <code>{candidate.rightCanonicalKey}</code>
+                      </>
+                    ) : null}
                   </td>
                   <td>{candidate.reason}</td>
                 </tr>
@@ -969,27 +989,34 @@ export function Dashboard({ initialOverview }: DashboardProps) {
 
       <section className="panel">
         <h2>Endpoints</h2>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Method</th>
-                <th>Path</th>
-                <th>Description</th>
-              </tr>
-            </thead>
-            <tbody>
-              {overview.endpoints.map((endpoint) => (
-                <tr key={`${endpoint.method}:${endpoint.path}`}>
-                  <td>{endpoint.method}</td>
-                  <td>
-                    <code>{endpoint.path}</code>
-                  </td>
-                  <td>{endpoint.description}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        <div className="endpoint-category-stack">
+          {endpointGroups.map((group) => (
+            <article key={group.category} className="endpoint-category">
+              <h3>{group.category}</h3>
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Method</th>
+                      <th>Path</th>
+                      <th>Description</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {group.endpoints.map((endpoint) => (
+                      <tr key={`${group.category}:${endpoint.method}:${endpoint.path}`}>
+                        <td>{endpoint.method}</td>
+                        <td>
+                          <code>{endpoint.path}</code>
+                        </td>
+                        <td>{endpoint.description}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </article>
+          ))}
         </div>
       </section>
 

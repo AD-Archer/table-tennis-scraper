@@ -8,111 +8,161 @@ import { isWTTGenderedSinglesEvent } from "@/lib/wtt/events";
 
 const appEndpoints: EndpointRow[] = [
   {
+    method: "POST",
+    path: "/api/mcp",
+    category: "MCP routes (AI + debugging)",
+    description: "MCP JSON-RPC endpoint exposing scrape controls, diagnostics, matches, and places.",
+  },
+  {
     method: "GET",
-    path: "/api/overview",
-    description: "Dashboard summary and endpoint catalog.",
+    path: "/api/mcp",
+    category: "MCP routes (AI + debugging)",
+    description: "MCP endpoint metadata and tool catalog.",
   },
   {
     method: "POST",
     path: "/api/scrape/ttbl",
+    category: "Internal API routes (lambda triggers)",
     description:
       "Run TTBL scraper for one or more seasons (supports 2025 or 2025-2026 style inputs).",
   },
   {
     method: "POST",
     path: "/api/scrape/ttbl/followup",
+    category: "Internal API routes (lambda triggers)",
     description:
       "Schedule a background TTBL follow-up scrape (used for live/in-progress monitoring).",
   },
   {
     method: "GET",
     path: "/api/scrape/ttbl/followup",
+    category: "Internal API routes (lambda triggers)",
     description: "Read current TTBL background follow-up schedule/status.",
   },
   {
     method: "POST",
     path: "/api/scrape/ttbl/all",
+    category: "Internal API routes (lambda triggers)",
     description:
       "Run all-time TTBL scrape (discover seasons + scrape + rebuild players) without deleting WTT data.",
   },
   {
     method: "POST",
     path: "/api/scrape/wtt",
+    category: "Internal API routes (lambda triggers)",
     description: "Run ITTF/WTT scraper for one or more years (TTU backend, singles-only by default).",
   },
   {
     method: "POST",
     path: "/api/scrape/wtt/followup",
+    category: "Internal API routes (lambda triggers)",
     description:
       "Schedule a background WTT follow-up scrape (used for live/in-progress monitoring).",
   },
   {
     method: "GET",
     path: "/api/scrape/wtt/followup",
+    category: "Internal API routes (lambda triggers)",
     description: "Read current WTT background follow-up schedule/status.",
   },
   {
     method: "POST",
     path: "/api/scrape/wtt/all",
+    category: "Internal API routes (lambda triggers)",
     description:
       "Run all-time WTT scrape (discover years + scrape + rebuild players) without deleting TTBL data.",
   },
   {
     method: "POST",
     path: "/api/scrape/clean",
+    category: "Internal API routes (lambda triggers)",
     description:
       "Delete existing database rows and run a full all-time scrape for TTBL + ITTF/WTT.",
   },
   {
     method: "POST",
     path: "/api/data/destroy",
+    category: "Internal API routes (lambda triggers)",
     description: "Delete all stored relational data.",
-  },
-  {
-    method: "GET",
-    path: "/api/players/registry",
-    description: "Read deduped player registry and merge candidates.",
   },
   {
     method: "POST",
     path: "/api/players/registry",
+    category: "Internal API routes (lambda triggers)",
     description: "Rebuild deduped player registry from scraped data.",
   },
   {
     method: "GET",
+    path: "/api/spindex/ping",
+    category: "Spindex routes (compare + push)",
+    description: "Ping SPINDEX public status endpoint and return upstream reachability details.",
+  },
+  {
+    method: "POST",
+    path: "/api/spindex/players/check",
+    category: "Spindex routes (compare + push)",
+    description: "Build local player payload, map Spindex IDs, and compare ratings against SPINDEX.",
+  },
+  {
+    method: "POST",
+    path: "/api/spindex/players/update",
+    category: "Spindex routes (compare + push)",
+    description: "Patch player rating updates to SPINDEX (`/api/private/players`) in batches.",
+  },
+  {
+    method: "POST",
+    path: "/api/spindex/sync",
+    category: "Spindex routes (compare + push)",
+    description: "Compatibility alias for player update sync route.",
+  },
+  {
+    method: "GET",
+    path: "/api/overview",
+    category: "Data and utility routes",
+    description: "Dashboard summary and endpoint catalog.",
+  },
+  {
+    method: "GET",
+    path: "/api/endpoints",
+    category: "Data and utility routes",
+    description: "List scraper, sync, MCP, and Spindex endpoint references.",
+  },
+  {
+    method: "GET",
+    path: "/api/pipeline/status",
+    category: "Data and utility routes",
+    description: "Read WTT pipeline detector status and recent event-level metrics.",
+  },
+  {
+    method: "GET",
+    path: "/api/players/registry",
+    category: "Data and utility routes",
+    description: "Read deduped player registry and merge candidates.",
+  },
+  {
+    method: "GET",
     path: "/api/players/slugs",
+    category: "Data and utility routes",
     description:
       "Read flattened canonical player rows with merge candidates, match stats, scores, and inferred gender.",
   },
   {
     method: "GET",
     path: "/api/players/source-profiles",
+    category: "Data and utility routes",
     description: "Read source profile snapshots (TTBL/WTT) for a canonical player key.",
   },
   {
     method: "GET",
     path: "/api/countries/match",
+    category: "Data and utility routes",
     description: "Normalize and compare country names/codes (alias-aware).",
   },
   {
     method: "GET",
-    path: "/api/endpoints",
-    description: "List scraper and registry endpoint references.",
-  },
-  {
-    method: "GET",
     path: "/api/sync/activity",
+    category: "Data and utility routes",
     description: "Read persistent TTBL/WTT background sync activity log.",
-  },
-  {
-    method: "POST",
-    path: "/api/mcp",
-    description: "MCP JSON-RPC endpoint exposing scrape controls, diagnostics, matches, and places.",
-  },
-  {
-    method: "GET",
-    path: "/api/mcp",
-    description: "MCP endpoint metadata and tool catalog.",
   },
 ];
 

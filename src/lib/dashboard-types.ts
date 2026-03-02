@@ -10,6 +10,7 @@ export interface EndpointRow {
   method: "GET" | "POST" | "PATCH";
   path: string;
   description: string;
+  category: string;
 }
 
 export interface DashboardOverview {
