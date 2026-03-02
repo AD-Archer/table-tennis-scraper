@@ -192,7 +192,32 @@ export function Dashboard({ initialOverview }: DashboardProps) {
   }, []);
 
   const mergeCandidates = useMemo(
-    () => (overview.players?.mergeCandidates ?? []).slice(0, 16),
+    () => {
+      const seen = new Set<string>();
+      const out: NonNullable<DashboardOverview["players"]>["mergeCandidates"] = [];
+
+      for (const row of overview.players?.mergeCandidates ?? []) {
+        const left = row.leftCanonicalKey.trim();
+        const right = row.rightCanonicalKey.trim();
+        const reason = row.reason.trim().toLowerCase().replace(/\s+/g, " ");
+        if (!left || !right || !reason) {
+          continue;
+        }
+
+        const pair = [left, right].sort((a, b) => a.localeCompare(b));
+        const signature = `${pair[0]}::${pair[1]}::${reason}`;
+        if (seen.has(signature)) {
+          continue;
+        }
+        seen.add(signature);
+        out.push(row);
+        if (out.length >= 16) {
+          break;
+        }
+      }
+
+      return out;
+    },
     [overview.players?.mergeCandidates],
   );
   const syncLogLines = useMemo(
@@ -957,9 +982,9 @@ export function Dashboard({ initialOverview }: DashboardProps) {
               </tr>
             </thead>
             <tbody>
-              {mergeCandidates.map((candidate) => (
+              {mergeCandidates.map((candidate, index) => (
                 <tr
-                  key={`${candidate.leftCanonicalKey}:${candidate.rightCanonicalKey}`}
+                  key={`${candidate.leftCanonicalKey}:${candidate.rightCanonicalKey}:${candidate.reason}:${index}`}
                 >
                   <td>
                     {candidate.leftName}

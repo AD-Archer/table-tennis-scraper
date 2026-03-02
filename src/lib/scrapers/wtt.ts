@@ -264,6 +264,35 @@ function parseYearFromDate(value: unknown): string | null {
   return String(parsed.getUTCFullYear());
 }
 
+function resolveMatchYear(
+  expectedYear: number,
+  ...candidateYears: Array<string | null>
+): string {
+  const expected = safeInt(expectedYear);
+  if (expected === null) {
+    const firstValid = candidateYears
+      .map((row) => safeInt(row))
+      .find((row): row is number => row !== null);
+    return firstValid !== undefined ? String(firstValid) : "";
+  }
+
+  const parsedCandidates = candidateYears
+    .map((row) => safeInt(row))
+    .filter((row): row is number => row !== null);
+
+  const exact = parsedCandidates.find((row) => row === expected);
+  if (exact !== undefined) {
+    return String(exact);
+  }
+
+  const near = parsedCandidates.find((row) => Math.abs(row - expected) <= 1);
+  if (near !== undefined) {
+    return String(near);
+  }
+
+  return String(expected);
+}
+
 function toRecord(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object") {
     return {};
@@ -551,7 +580,11 @@ function toRows(payload: unknown): FabrikPlayerRow[] {
   return payload as FabrikPlayerRow[];
 }
 
-function rowToMatch(row: FabrikPlayerRow, listId: string): WTTMatch | null {
+function rowToMatch(
+  row: FabrikPlayerRow,
+  listId: string,
+  expectedYear: number,
+): WTTMatch | null {
   const matchId = String(row.vw_matches___id ?? "").trim();
   if (!matchId) {
     return null;
@@ -565,12 +598,17 @@ function rowToMatch(row: FabrikPlayerRow, listId: string): WTTMatch | null {
     winnerInferred = finalSets.a > finalSets.x ? "A" : "X";
   }
 
+  const resolvedYear = resolveMatchYear(
+    expectedYear,
+    String(row.vw_matches___yr_raw ?? row.vw_matches___yr ?? "").trim() || null,
+  );
+
   return {
     match_id: matchId,
     source_match_id: matchId,
     event_id: row.vw_matches___tournament_id ?? null,
     sub_event_code: row.vw_matches___event ?? null,
-    year: String(row.vw_matches___yr_raw ?? row.vw_matches___yr ?? "").trim() || null,
+    year: resolvedYear,
     last_updated_at: null,
     tournament: row.vw_matches___tournament_id ?? null,
     event: row.vw_matches___event ?? null,
@@ -960,6 +998,7 @@ function ttuMessageToMatch(
   row: TTUMessageRow,
   event: TTUEventRow,
   streamCode: WTTEventFetchCode,
+  expectedYear: number,
 ): WTTMatch | null {
   const rawPayload = cleanText(row.MessagePayLoad);
   if (!rawPayload) {
@@ -1052,8 +1091,23 @@ function ttuMessageToMatch(
   const eventId = cleanText(event.EventId) ?? cleanText(row.EventId) ?? "unknown";
   const matchId = `${eventId}:${streamCode}:${sourceMatchId}`;
 
-  const year =
+  const yearFromPayload = parseYearFromDate(
+    pickValue(payload, [
+      "localDate",
+      "LocalDate",
+      "logicalDate",
+      "LogicalDate",
+      "utcDate",
+      "UTCDate",
+    ]),
+  );
+  const yearFromEvent =
     parseYearFromDate(event.EventStartDate) ??
+    parseYearFromDate(event.EventEndDate);
+  const year = resolveMatchYear(
+    expectedYear,
+    yearFromPayload,
+    yearFromEvent,
     parseYearFromDate(
       pickValue(payload, [
         "localDate",
@@ -1063,7 +1117,8 @@ function ttuMessageToMatch(
         "utcDate",
         "UTCDate",
       ]),
-    );
+    ),
+  );
   const tournament = getTTUEventName(event);
   const eventName =
     pickText(sportDescription, ["eventName", "EventName"]) ??
@@ -1345,7 +1400,7 @@ async function scrapeWTTMatchesViaTTU(
         let streamNotFinished = 0;
         let streamYouth = 0;
         for (const message of latestByMatch.values()) {
-          const normalized = ttuMessageToMatch(message, event, eventCode);
+          const normalized = ttuMessageToMatch(message, event, eventCode, year);
           if (!normalized) {
             continue;
           }
@@ -1798,7 +1853,7 @@ export async function scrapeWTTMatches(
             continue;
           }
 
-          const normalized = rowToMatch(row, listId);
+          const normalized = rowToMatch(row, listId, year);
           if (!normalized) {
             continue;
           }

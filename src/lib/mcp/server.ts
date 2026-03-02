@@ -4,6 +4,7 @@ import {
   describeCountry,
   listCountryMappings,
 } from "@/lib/normalization/country";
+import { buildCountryConflictReport } from "@/lib/players/country-conflicts";
 import {
   getPlayerFieldMappingContract,
   normalizeCanonicalField,
@@ -1087,6 +1088,22 @@ async function toolMatchCountry(args: JsonObject): Promise<unknown> {
   };
 }
 
+async function toolAuditCountryConflicts(args: JsonObject): Promise<unknown> {
+  const limit = clamp(
+    Number.parseInt(String(args.limit ?? 100), 10) || 100,
+    1,
+    500,
+  );
+  const includeCompatible = args.includeCompatible === true;
+  const includeCountryDetail = args.includeCountryDetail === true;
+
+  return await buildCountryConflictReport({
+    limit,
+    includeCompatible,
+    includeCountryDetail,
+  });
+}
+
 const tools: Array<MCPToolDefinition & { handler: ToolHandler }> = [
   {
     name: "get_overview",
@@ -1314,6 +1331,21 @@ const tools: Array<MCPToolDefinition & { handler: ToolHandler }> = [
       },
     },
     handler: async (args) => await toolMatchCountry(args),
+  },
+  {
+    name: "audit_country_conflicts",
+    description:
+      "List country-related merge blockers/candidates and show normalized compatibility across canonical pairs.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        limit: { type: "integer", minimum: 1, maximum: 500 },
+        includeCompatible: { type: "boolean" },
+        includeCountryDetail: { type: "boolean" },
+      },
+    },
+    handler: async (args) => await toolAuditCountryConflicts(args),
   },
   {
     name: "field_mapping",

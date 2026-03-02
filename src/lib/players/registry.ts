@@ -155,6 +155,23 @@ function normalizeCountry(value: string | null | undefined): string | null {
   return normalizeCountryCode(value);
 }
 
+function resolveWTTCountry(
+  nationality: string | null | undefined,
+  countryName: string | null | undefined,
+): string | null {
+  const fromNationality = normalizeCountry(nationality);
+  const fromCountryName = normalizeCountry(countryName);
+
+  if (fromNationality && fromCountryName) {
+    if (areCountriesCompatible(fromNationality, fromCountryName)) {
+      return fromNationality;
+    }
+    return fromCountryName;
+  }
+
+  return fromNationality ?? fromCountryName;
+}
+
 function normalizeSourceGender(value: string | null | undefined): PlayerGender | null {
   const normalized = cleanName(value ?? "").toUpperCase();
   if (!normalized) {
@@ -377,6 +394,41 @@ async function isRegistryStale(): Promise<boolean> {
   return sourceTimestamp > registryTimestamp;
 }
 
+function hasLegacyMergeReason(reason: string): boolean {
+  const normalized = reason.trim().toLowerCase();
+  return normalized.includes("country mismatch");
+}
+
+function snapshotNeedsMergeCandidateRefresh(snapshot: PlayerRegistrySnapshot): boolean {
+  const seen = new Set<string>();
+
+  for (const row of snapshot.mergeCandidates) {
+    const left = row.leftCanonicalKey.trim();
+    const right = row.rightCanonicalKey.trim();
+    const reason = row.reason.trim().toLowerCase().replace(/\s+/g, " ");
+    if (!left || !right || !reason) {
+      return true;
+    }
+
+    if (left === right) {
+      return true;
+    }
+
+    if (hasLegacyMergeReason(reason)) {
+      return true;
+    }
+
+    const pair = [left, right].sort((a, b) => a.localeCompare(b));
+    const signature = `${pair[0]}::${pair[1]}::${reason}`;
+    if (seen.has(signature)) {
+      return true;
+    }
+    seen.add(signature);
+  }
+
+  return false;
+}
+
 async function collectTTBLPlayersFromDb(
   ttblProfiles: Record<string, TTBLPlayerProfile>,
   log?: RegistryLogFn,
@@ -477,6 +529,7 @@ async function collectWTTPlayersFromDb(
           fullName: true,
           dob: true,
           nationality: true,
+          countryName: true,
           gender: true,
         },
       }),
@@ -562,7 +615,7 @@ async function collectWTTPlayersFromDb(
           displayName,
           normalizedName,
           dobIso: normalizeDateToIso(row.dob),
-          country: normalizeCountry(row.nationality),
+          country: resolveWTTCountry(row.nationality, row.countryName),
           gender: mergedGender,
         });
         continue;
@@ -576,7 +629,7 @@ async function collectWTTPlayersFromDb(
           normalizedName,
           season,
           dobIso: normalizeDateToIso(row.dob),
-          country: normalizeCountry(row.nationality),
+          country: resolveWTTCountry(row.nationality, row.countryName),
           gender: mergedGender,
         });
       }
@@ -840,31 +893,52 @@ function autoConsolidateWTTIdentityHints(
       ...new Set(
         identities.flatMap((row) => [...row.dobIsoValues]).filter(Boolean),
       ),
-    ];
+    ].sort((a, b) => a.localeCompare(b));
     const countryValues = [
       ...new Set(
         identities.flatMap((row) => [...row.countries]).filter(Boolean),
       ),
-    ];
+    ].sort((a, b) => a.localeCompare(b));
     const genderValues = [
       ...new Set(
         identities.flatMap((row) => [...row.genders]).filter(Boolean),
       ),
-    ];
+    ].sort((a, b) => a.localeCompare(b));
+
+    const hasGenderConflict = genderValues.length > 1;
+    const canMergeByExactDob = dobValues.length === 1;
+    const canOverrideGenderConflict = hasGenderConflict && canMergeByExactDob;
+
+    if (hasGenderConflict && !canOverrideGenderConflict) {
+      const dedupeKey = `wtt:${nameKey}:gender-conflict`;
+      if (!issueDedupe.has(dedupeKey)) {
+        issueDedupe.add(dedupeKey);
+        issues.push({
+          leftCanonicalKey: `wtt:${identities[0]?.sourceId ?? "unknown"}`,
+          rightCanonicalKey: `wtt:${identities[1]?.sourceId ?? identities[0]?.sourceId ?? "unknown"}`,
+          leftName: identities[0]?.displayName ?? nameKey,
+          rightName: identities[1]?.displayName ?? identities[0]?.displayName ?? nameKey,
+          reason: `WTT internal split unresolved for name key (${nameKey}): gender mismatch across IDs.`,
+        });
+      }
+      continue;
+    }
 
     const dobYears = [...new Set(dobValues.map((value) => extractBirthYear(value)).filter(Number.isFinite))] as number[];
     const nearDobMergeEligible =
       identities.length === 2 &&
       dobValues.length === 2 &&
       dobYears.length === 2 &&
-      countryValues.length <= 1 &&
-      genderValues.length <= 1 &&
       Math.abs(dobYears[0] - dobYears[1]) <= 3;
-    const canMergeByExactDob = dobValues.length === 1;
-    const canMerge = canMergeByExactDob || nearDobMergeEligible;
+    const hasKnownProfileSignal =
+      countryValues.length > 0 || (genderValues.length > 0 && !hasGenderConflict);
+    const hasDobConflict = dobValues.length > 1 && !nearDobMergeEligible;
+    const canMergeByProfileConsensus =
+      hasKnownProfileSignal && !hasDobConflict;
+    const canMerge = canMergeByExactDob || nearDobMergeEligible || canMergeByProfileConsensus;
 
     if (!canMerge) {
-      const dedupeKey = `wtt:${nameKey}:dob:${dobValues.sort().join("|")}`;
+      const dedupeKey = `wtt:${nameKey}:dob:${dobValues.join("|")}`;
       if (!issueDedupe.has(dedupeKey)) {
         issueDedupe.add(dedupeKey);
         issues.push({
@@ -878,24 +952,11 @@ function autoConsolidateWTTIdentityHints(
       continue;
     }
 
-    if (countryValues.length > 1 || genderValues.length > 1) {
-      const dedupeKey = `wtt:${nameKey}:profile-conflict`;
-      if (!issueDedupe.has(dedupeKey)) {
-        issueDedupe.add(dedupeKey);
-        issues.push({
-          leftCanonicalKey: `wtt:${identities[0]?.sourceId ?? "unknown"}`,
-          rightCanonicalKey: `wtt:${identities[1]?.sourceId ?? identities[0]?.sourceId ?? "unknown"}`,
-          leftName: identities[0]?.displayName ?? nameKey,
-          rightName: identities[1]?.displayName ?? identities[0]?.displayName ?? nameKey,
-          reason: `WTT internal split unresolved for name key (${nameKey}): conflicting country/gender across IDs.`,
-        });
-      }
-      continue;
-    }
-
     const canonicalHint = canMergeByExactDob
       ? `wtt-profile:${nameKey}:dob:${dobValues[0]}`
-      : `wtt-profile:${nameKey}:country:${countryValues[0] ?? "unk"}:near-dob`;
+      : nearDobMergeEligible
+        ? `wtt-profile:${nameKey}:country:${countryValues[0] ?? "unk"}:near-dob`
+        : `wtt-profile:${nameKey}:country:${countryValues[0] ?? "unk"}:gender:${genderValues[0] ?? "unk"}:profile-consensus`;
     let groupChanged = false;
     for (const row of sourcePlayers) {
       if (row.source !== "wtt") {
@@ -1020,10 +1081,6 @@ function autoLinkWTTToTTBL(
       }
 
       const compatible = ttblRows.filter((ttbl) => {
-        const countryCompatible =
-          !wtt.country ||
-          ttbl.countries.size === 0 ||
-          [...ttbl.countries].some((country) => areCountriesCompatible(country, wtt.country));
         const genderCompatible =
           !wtt.gender ||
           wtt.gender === "unknown" ||
@@ -1046,14 +1103,14 @@ function autoLinkWTTToTTBL(
         }
 
         if (dobConflict) {
-          return countryCompatible && oneToOne && closeBirthYear;
+          return oneToOne && closeBirthYear;
         }
 
         if (!wtt.dobIso || ttbl.dobIsoValues.size === 0) {
-          return countryCompatible && oneToOne;
+          return oneToOne;
         }
 
-        if (countryCompatible && oneToOne && closeBirthYear) {
+        if (oneToOne && closeBirthYear) {
           return true;
         }
 
@@ -1100,13 +1157,6 @@ function autoLinkWTTToTTBL(
           ttbl.dobIsoValues.size > 0 &&
           !ttbl.dobIsoValues.has(wtt.dobIso ?? ""),
       );
-      const hasCountryConflict =
-        Boolean(wtt.country) &&
-        ttblRows.every(
-          (ttbl) =>
-            ttbl.countries.size > 0 &&
-            ![...ttbl.countries].some((country) => areCountriesCompatible(country, wtt.country)),
-        );
       const hasGenderConflict =
         Boolean(wtt.gender) &&
         wtt.gender !== "unknown" &&
@@ -1118,9 +1168,7 @@ function autoLinkWTTToTTBL(
         ? "DOB mismatch"
         : hasGenderConflict
           ? "gender mismatch"
-          : hasCountryConflict
-            ? "country mismatch"
-            : "insufficient evidence";
+          : "insufficient evidence";
       const dedupeKey = `${issueKeyBase}:blocked:${detail}`;
       if (!issueDedupe.has(dedupeKey)) {
         issueDedupe.add(dedupeKey);
@@ -1213,22 +1261,14 @@ function autoLinkWTTToTTBL(
       continue;
     }
 
-    const candidates = [...ttblByIdentity.values()].filter((ttbl) => {
-      const surnameMatch = [...ttbl.surnames].some((surname) => surname === wttParts.surname);
-      if (!surnameMatch) {
-        return false;
-      }
+      const candidates = [...ttblByIdentity.values()].filter((ttbl) => {
+        const surnameMatch = [...ttbl.surnames].some((surname) => surname === wttParts.surname);
+        if (!surnameMatch) {
+          return false;
+        }
 
       const givenMatch = [...ttbl.givenNames].some((given) => givenNamesSimilar(given, wttParts.given));
       if (!givenMatch) {
-        return false;
-      }
-
-      const countryCompatible =
-        !wtt.country ||
-        ttbl.countries.size === 0 ||
-        [...ttbl.countries].some((country) => areCountriesCompatible(country, wtt.country));
-      if (!countryCompatible) {
         return false;
       }
 
@@ -1244,7 +1284,8 @@ function autoLinkWTTToTTBL(
       const hasHardDobConflict =
         Boolean(wtt.dobIso) &&
         ttbl.dobIsoValues.size > 0 &&
-        !ttbl.dobIsoValues.has(wtt.dobIso ?? "");
+        !ttbl.dobIsoValues.has(wtt.dobIso ?? "") &&
+        !hasCloseBirthYearMatch(wtt.dobIso, ttbl.dobIsoValues);
       if (hasHardDobConflict) {
         return false;
       }
@@ -1481,12 +1522,15 @@ function dedupeMergeCandidates(candidates: PlayerMergeCandidate[]): PlayerMergeC
   for (const row of candidates) {
     const leftKey = row.leftCanonicalKey.trim();
     const rightKey = row.rightCanonicalKey.trim();
-    const reason = row.reason.trim().toLowerCase();
+    const reason = row.reason.trim().toLowerCase().replace(/\s+/g, " ");
     if (!leftKey || !rightKey || !reason) {
       continue;
     }
 
     const pair = [leftKey, rightKey].sort((a, b) => a.localeCompare(b));
+    if (pair[0] === pair[1]) {
+      continue;
+    }
     const signature = `${pair[0]}::${pair[1]}::${reason}`;
     if (seen.has(signature)) {
       continue;
@@ -1815,7 +1859,11 @@ export async function getPlayerRegistrySnapshot(): Promise<PlayerRegistrySnapsho
 
 export async function ensurePlayerRegistry(): Promise<PlayerRegistrySnapshot | null> {
   const existing = await getPlayerRegistrySnapshot();
-  if (existing && !(await isRegistryStale())) {
+  const stale = await isRegistryStale();
+  const needsMergeCandidateRefresh =
+    existing ? snapshotNeedsMergeCandidateRefresh(existing) : false;
+
+  if (existing && !stale && !needsMergeCandidateRefresh) {
     return existing;
   }
 

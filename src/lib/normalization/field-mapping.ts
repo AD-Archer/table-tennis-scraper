@@ -1,5 +1,5 @@
 import { PlayerCountrySource, PlayerGender, PlayerGenderSource } from "@/lib/types";
-import { normalizeCountryCode } from "@/lib/normalization/country";
+import { areCountriesCompatible, normalizeCountryCode } from "@/lib/normalization/country";
 
 export const PLAYER_FIELD_MAPPING_VERSION = "2026-02-27";
 
@@ -353,15 +353,31 @@ export function getPlayerFieldMappingContract(): {
 export function resolveCanonicalCountry(
   signals: {
     wttNationality: string | null;
+    wttCountryName?: string | null;
     ttblNationality: string | null;
   },
 ): { country: string | null; source: PlayerCountrySource } {
+  const fromTtbl = normalizeCountryCode(signals.ttblNationality);
   const fromWtt = normalizeCountryCode(signals.wttNationality);
-  if (fromWtt) {
-    return { country: fromWtt, source: "wtt_profile_nationality" };
+  const fromWttName = normalizeCountryCode(signals.wttCountryName ?? null);
+  const fromWttResolved =
+    fromWtt && fromWttName
+      ? areCountriesCompatible(fromWtt, fromWttName)
+        ? fromWtt
+        : fromWttName
+      : fromWtt ?? fromWttName;
+
+  if (fromWttResolved && fromTtbl) {
+    if (areCountriesCompatible(fromWttResolved, fromTtbl)) {
+      return { country: fromWttResolved, source: "wtt_profile_nationality" };
+    }
+    return { country: fromTtbl, source: "ttbl_profile_nationality" };
   }
 
-  const fromTtbl = normalizeCountryCode(signals.ttblNationality);
+  if (fromWttResolved) {
+    return { country: fromWttResolved, source: "wtt_profile_nationality" };
+  }
+
   if (fromTtbl) {
     return { country: fromTtbl, source: "ttbl_profile_nationality" };
   }
@@ -377,7 +393,7 @@ export function resolveCanonicalGender(
     hasTTBLMember: boolean;
   },
 ): { gender: PlayerGender; source: PlayerGenderSource } {
-  if (signals.eventInferredGender !== "unknown") {
+  if (signals.eventInferredGender === "M" || signals.eventInferredGender === "W") {
     return {
       gender: signals.eventInferredGender,
       source: "wtt_event_inference",
@@ -388,6 +404,13 @@ export function resolveCanonicalGender(
     return {
       gender: signals.wttProfileGender,
       source: "wtt_profile_gender",
+    };
+  }
+
+  if (signals.eventInferredGender === "mixed") {
+    return {
+      gender: "mixed",
+      source: "wtt_event_inference",
     };
   }
 

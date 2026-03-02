@@ -154,6 +154,13 @@ const appEndpoints: EndpointRow[] = [
   },
   {
     method: "GET",
+    path: "/api/players/country-conflicts",
+    category: "Data and utility routes",
+    description:
+      "Audit country-related merge blockers/candidates with canonical key pairs and compatibility flags.",
+  },
+  {
+    method: "GET",
     path: "/api/countries/match",
     category: "Data and utility routes",
     description: "Normalize and compare country names/codes (alias-aware).",

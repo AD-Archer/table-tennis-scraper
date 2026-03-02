@@ -2,6 +2,7 @@ import {
   resolveCanonicalCountry,
   resolveCanonicalGender,
 } from "@/lib/normalization/field-mapping";
+import { areCountriesCompatible, normalizeCountryCode } from "@/lib/normalization/country";
 import { getPrismaClient } from "@/lib/db/prisma";
 import { ensurePlayerRegistry } from "@/lib/players/registry";
 import { readTTBLPlayerProfiles } from "@/lib/ttbl/player-profiles";
@@ -31,9 +32,27 @@ interface WTTAggregate {
   wins: number;
   losses: number;
   nationality: string | null;
+  countryName: string | null;
   profileGender: PlayerGender;
   genderCounts: Record<PlayerGender, number>;
   recentMatches: PlayerSlugMatchEntry[];
+}
+
+function resolveWTTCountrySignal(
+  nationality: string | null | undefined,
+  countryName: string | null | undefined,
+): string | null {
+  const fromNationality = normalizeCountryCode(nationality);
+  const fromCountryName = normalizeCountryCode(countryName);
+
+  if (fromNationality && fromCountryName) {
+    if (areCountriesCompatible(fromNationality, fromCountryName)) {
+      return fromNationality;
+    }
+    return fromCountryName;
+  }
+
+  return fromNationality ?? fromCountryName;
 }
 
 function parseSeasonStart(season: string): number {
@@ -189,23 +208,38 @@ function buildCandidateMap(
   candidates: PlayerMergeCandidate[],
 ): Map<string, PlayerSlugCandidateEntry[]> {
   const map = new Map<string, PlayerSlugCandidateEntry[]>();
+  const seen = new Set<string>();
 
   for (const candidate of candidates) {
-    const leftRows = map.get(candidate.leftCanonicalKey) ?? [];
-    leftRows.push({
-      otherCanonicalKey: candidate.rightCanonicalKey,
-      otherName: candidate.rightName,
-      reason: candidate.reason,
-    });
-    map.set(candidate.leftCanonicalKey, leftRows);
+    const left = candidate.leftCanonicalKey.trim();
+    const right = candidate.rightCanonicalKey.trim();
+    const reason = candidate.reason.trim().replace(/\s+/g, " ");
+    if (!left || !right || !reason || left === right) {
+      continue;
+    }
 
-    const rightRows = map.get(candidate.rightCanonicalKey) ?? [];
-    rightRows.push({
-      otherCanonicalKey: candidate.leftCanonicalKey,
-      otherName: candidate.leftName,
-      reason: candidate.reason,
+    const pair = [left, right].sort((a, b) => a.localeCompare(b));
+    const signature = `${pair[0]}::${pair[1]}::${reason.toLowerCase()}`;
+    if (seen.has(signature)) {
+      continue;
+    }
+    seen.add(signature);
+
+    const leftRows = map.get(left) ?? [];
+    leftRows.push({
+      otherCanonicalKey: right,
+      otherName: candidate.rightName,
+      reason,
     });
-    map.set(candidate.rightCanonicalKey, rightRows);
+    map.set(left, leftRows);
+
+    const rightRows = map.get(right) ?? [];
+    rightRows.push({
+      otherCanonicalKey: left,
+      otherName: candidate.leftName,
+      reason,
+    });
+    map.set(right, rightRows);
   }
 
   for (const [key, rows] of map.entries()) {
@@ -413,7 +447,8 @@ async function collectWTTAggregates(): Promise<Map<string, WTTAggregate>> {
       matchesPlayed: 0,
       wins: 0,
       losses: 0,
-      nationality: row.nationality,
+      nationality: resolveWTTCountrySignal(row.nationality, row.countryName),
+      countryName: row.countryName,
       profileGender:
         row.gender === "M" || row.gender === "W" || row.gender === "mixed"
           ? row.gender
@@ -447,6 +482,7 @@ async function collectWTTAggregates(): Promise<Map<string, WTTAggregate>> {
         wins: 0,
         losses: 0,
         nationality: null,
+        countryName: null,
         profileGender: "unknown",
         genderCounts: { M: 0, W: 0, mixed: 0, unknown: 0 },
         recentMatches: [],
@@ -481,6 +517,7 @@ async function collectWTTAggregates(): Promise<Map<string, WTTAggregate>> {
         wins: 0,
         losses: 0,
         nationality: null,
+        countryName: null,
         profileGender: "unknown",
         genderCounts: { M: 0, W: 0, mixed: 0, unknown: 0 },
         recentMatches: [],
@@ -528,11 +565,18 @@ function inferGenderFromCounts(counts: Record<PlayerGender, number>): PlayerGend
   return "unknown";
 }
 
+function inferProfileGenderFromVotes(votes: { M: number; W: number }): PlayerGender {
+  if (votes.M === 0 && votes.W === 0) {
+    return "unknown";
+  }
+  return votes.M >= votes.W ? "M" : "W";
+}
+
 function resolveWTTGenderForCanonicalPlayer(
   player: CanonicalPlayer,
   wttById: Map<string, WTTAggregate>,
 ): PlayerGender {
-  let wttProfileGender: PlayerGender = "unknown";
+  const profileVotes = { M: 0, W: 0 };
   const genderCounts: Record<PlayerGender, number> = {
     M: 0,
     W: 0,
@@ -550,8 +594,8 @@ function resolveWTTGenderForCanonicalPlayer(
       continue;
     }
 
-    if (wttProfileGender === "unknown" && wtt.profileGender !== "unknown") {
-      wttProfileGender = wtt.profileGender;
+    if (wtt.profileGender === "M" || wtt.profileGender === "W") {
+      profileVotes[wtt.profileGender] += 1;
     }
 
     for (const key of Object.keys(genderCounts) as PlayerGender[]) {
@@ -560,11 +604,16 @@ function resolveWTTGenderForCanonicalPlayer(
   }
 
   const eventInferredGender = inferGenderFromCounts(genderCounts);
-  if (eventInferredGender !== "unknown") {
+  if (eventInferredGender === "M" || eventInferredGender === "W") {
     return eventInferredGender;
   }
 
-  return wttProfileGender;
+  const profileGender = inferProfileGenderFromVotes(profileVotes);
+  if (profileGender !== "unknown") {
+    return profileGender;
+  }
+
+  return eventInferredGender === "mixed" ? "mixed" : "unknown";
 }
 
 function buildTTBLLeagueGenderMap(
@@ -631,6 +680,7 @@ function combineCanonicalRow(
   let losses = 0;
   let ttblCountry: string | null = null;
   let wttCountry: string | null = null;
+  let wttCountryName: string | null = null;
   const seasons = new Set<string>();
   const sources = new Set<"ttbl" | "wtt">();
   const sourceIds: string[] = [];
@@ -638,7 +688,7 @@ function combineCanonicalRow(
   let hasTTBLMember = false;
   const ttblLeagueIds = new Set<string>();
   const ttblLeagueNames = new Set<string>();
-  let wttProfileGender: PlayerGender = "unknown";
+  const wttProfileVotes = { M: 0, W: 0 };
   const genderCounts: Record<PlayerGender, number> = {
     M: 0,
     W: 0,
@@ -686,8 +736,11 @@ function combineCanonicalRow(
         if (!wttCountry && wtt.nationality) {
           wttCountry = wtt.nationality;
         }
-        if (wttProfileGender === "unknown" && wtt.profileGender !== "unknown") {
-          wttProfileGender = wtt.profileGender;
+        if (!wttCountryName && wtt.countryName) {
+          wttCountryName = wtt.countryName;
+        }
+        if (wtt.profileGender === "M" || wtt.profileGender === "W") {
+          wttProfileVotes[wtt.profileGender] += 1;
         }
         recentMatches.push(...wtt.recentMatches);
         for (const key of Object.keys(genderCounts) as PlayerGender[]) {
@@ -709,8 +762,10 @@ function combineCanonicalRow(
     : "unknown";
   const { country, source: countrySource } = resolveCanonicalCountry({
     wttNationality: wttCountry,
+    wttCountryName,
     ttblNationality: ttblCountry,
   });
+  const wttProfileGender = inferProfileGenderFromVotes(wttProfileVotes);
   const { gender, source: genderSource } = resolveCanonicalGender({
     eventInferredGender: inferredGender,
     wttProfileGender,

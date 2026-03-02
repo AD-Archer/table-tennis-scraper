@@ -56,6 +56,53 @@ interface SourceProfilesApiResponse {
   error?: string;
 }
 
+interface LoadedSourceProfiles {
+  canonical: {
+    canonicalKey: string;
+    displayName: string;
+  };
+  members: PlayerSourceMemberDetail[];
+}
+
+interface CountryMatchApiResponse {
+  ok: boolean;
+  comparison?: {
+    compatible: boolean;
+  } | null;
+}
+
+interface CanonicalSummary {
+  canonicalKey: string;
+  displayName: string;
+  nameKey: string | null;
+  sourceIds: string[];
+  names: string[];
+  seasons: string[];
+  countries: string[];
+  genders: string[];
+  dobs: string[];
+}
+
+interface ClosenessCheck {
+  label: string;
+  status: "match" | "warn" | "block" | "missing";
+  detail: string;
+}
+
+interface ClosenessEvaluation {
+  score: number;
+  checks: ClosenessCheck[];
+}
+
+interface ComparePayload {
+  leftRaw: LoadedSourceProfiles;
+  rightRaw: LoadedSourceProfiles;
+  left: CanonicalSummary;
+  right: CanonicalSummary;
+  evaluation: ClosenessEvaluation;
+  countryCompatible: boolean | null;
+}
+
 function fmtRate(value: number | null): string {
   if (value === null) {
     return "-";
@@ -83,6 +130,234 @@ function formatBirthday(unixSeconds: number | null | undefined): string {
   }
 
   return date.toISOString().slice(0, 10);
+}
+
+function uniqueSorted(values: Array<string | null | undefined>): string[] {
+  return [...new Set(values.map((row) => (row ?? "").trim()).filter(Boolean))].sort((a, b) =>
+    a.localeCompare(b),
+  );
+}
+
+function normalizeNameToken(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function splitName(displayName: string): { given: string; surname: string } {
+  const parts = normalizeNameToken(displayName).split(" ").filter(Boolean);
+  if (parts.length === 0) {
+    return { given: "", surname: "" };
+  }
+
+  if (parts.length === 1) {
+    return { given: "", surname: parts[0] ?? "" };
+  }
+
+  return {
+    given: parts.slice(0, -1).join(" "),
+    surname: parts[parts.length - 1] ?? "",
+  };
+}
+
+function normalizeDob(value: string | null | undefined): string | null {
+  const text = (value ?? "").trim();
+  if (!text) {
+    return null;
+  }
+
+  const direct = text.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (direct?.[0]) {
+    return direct[0];
+  }
+
+  const parsed = new Date(text);
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+
+  return parsed.toISOString().slice(0, 10);
+}
+
+function summarizeCanonicalProfile(payload: LoadedSourceProfiles): CanonicalSummary {
+  const sourceIds = payload.members.map((member) => `${member.source}:${member.sourceId}`);
+  const names = payload.members.flatMap((member) => member.names);
+  const seasons = payload.members.flatMap((member) => member.seasons);
+  const countries: Array<string | null | undefined> = [];
+  const genders: Array<string | null | undefined> = [];
+  const dobs: Array<string | null | undefined> = [];
+
+  for (const member of payload.members) {
+    if (member.ttblProfile) {
+      countries.push(member.ttblProfile.nationality, member.ttblProfile.nationalitySecondary);
+      genders.push("M");
+      const ttblDob = formatBirthday(member.ttblProfile.birthdayUnix);
+      if (ttblDob !== "-") {
+        dobs.push(ttblDob);
+      }
+    }
+
+    if (member.wttProfile) {
+      countries.push(member.wttProfile.nationality, member.wttProfile.country_name);
+      genders.push(member.wttProfile.gender);
+      dobs.push(normalizeDob(member.wttProfile.dob));
+    }
+  }
+
+  const canonicalNameParts = splitName(payload.canonical.displayName);
+
+  return {
+    canonicalKey: payload.canonical.canonicalKey,
+    displayName: payload.canonical.displayName,
+    nameKey:
+      canonicalNameParts.surname && canonicalNameParts.given
+        ? `${canonicalNameParts.surname}|${canonicalNameParts.given}`
+        : null,
+    sourceIds: uniqueSorted(sourceIds),
+    names: uniqueSorted(names),
+    seasons: uniqueSorted(seasons),
+    countries: uniqueSorted(countries),
+    genders: uniqueSorted(genders),
+    dobs: uniqueSorted(dobs),
+  };
+}
+
+function evaluateCloseness(
+  left: CanonicalSummary,
+  right: CanonicalSummary,
+  countryCompatible: boolean | null,
+): ClosenessEvaluation {
+  const checks: ClosenessCheck[] = [];
+  let score = 40;
+
+  const leftName = splitName(left.displayName);
+  const rightName = splitName(right.displayName);
+  const sameSurname = leftName.surname && leftName.surname === rightName.surname;
+  const sameGiven = leftName.given && leftName.given === rightName.given;
+  const exactDisplay = normalizeNameToken(left.displayName) === normalizeNameToken(right.displayName);
+
+  if (exactDisplay || (sameSurname && sameGiven)) {
+    score += 30;
+    checks.push({
+      label: "Name",
+      status: "match",
+      detail: "Same surname + given name.",
+    });
+  } else if (sameSurname) {
+    score += 10;
+    checks.push({
+      label: "Name",
+      status: "warn",
+      detail: "Same surname but given name differs.",
+    });
+  } else {
+    score -= 20;
+    checks.push({
+      label: "Name",
+      status: "block",
+      detail: "Surname differs.",
+    });
+  }
+
+  if (left.countries.length === 0 || right.countries.length === 0) {
+    checks.push({
+      label: "Country",
+      status: "missing",
+      detail: "One side has no country value.",
+    });
+  } else if (countryCompatible === true) {
+    score += 15;
+    checks.push({
+      label: "Country",
+      status: "match",
+      detail: "Country values are alias-compatible.",
+    });
+  } else if (countryCompatible === false) {
+    score -= 25;
+    checks.push({
+      label: "Country",
+      status: "block",
+      detail: "Country values conflict.",
+    });
+  } else {
+    checks.push({
+      label: "Country",
+      status: "warn",
+      detail: "Compatibility check unavailable.",
+    });
+  }
+
+  const leftGender = left.genders[0] ?? null;
+  const rightGender = right.genders[0] ?? null;
+  if (!leftGender || !rightGender) {
+    checks.push({
+      label: "Gender",
+      status: "missing",
+      detail: "One side has no gender value.",
+    });
+  } else if (leftGender === rightGender) {
+    score += 10;
+    checks.push({
+      label: "Gender",
+      status: "match",
+      detail: `Both resolve to ${leftGender}.`,
+    });
+  } else {
+    score -= 15;
+    checks.push({
+      label: "Gender",
+      status: "block",
+      detail: `${leftGender} vs ${rightGender}.`,
+    });
+  }
+
+  const leftDobSet = new Set(left.dobs);
+  const rightDobSet = new Set(right.dobs);
+  const dobOverlap = [...leftDobSet].some((row) => rightDobSet.has(row));
+  if (left.dobs.length === 0 || right.dobs.length === 0) {
+    checks.push({
+      label: "DOB",
+      status: "missing",
+      detail: "One side has no DOB value.",
+    });
+  } else if (dobOverlap) {
+    score += 10;
+    checks.push({
+      label: "DOB",
+      status: "match",
+      detail: "At least one DOB value matches.",
+    });
+  } else {
+    score -= 20;
+    checks.push({
+      label: "DOB",
+      status: "block",
+      detail: "DOB values do not overlap.",
+    });
+  }
+
+  return {
+    score: Math.max(0, Math.min(100, score)),
+    checks,
+  };
+}
+
+function statusChipClass(status: ClosenessCheck["status"]): string {
+  if (status === "match") {
+    return "border-emerald-300 bg-emerald-50 text-emerald-800";
+  }
+
+  if (status === "block") {
+    return "border-rose-300 bg-rose-50 text-rose-800";
+  }
+
+  if (status === "warn") {
+    return "border-amber-300 bg-amber-50 text-amber-800";
+  }
+
+  return "border-slate-300 bg-slate-50 text-slate-700";
 }
 
 export function PlayerSlugBrowser() {
@@ -114,6 +389,14 @@ export function PlayerSlugBrowser() {
   const [profileMembers, setProfileMembers] = useState<PlayerSourceMemberDetail[]>([]);
   const [profileLoading, setProfileLoading] = useState(false);
   const [profileError, setProfileError] = useState<string | null>(null);
+  const [compareTarget, setCompareTarget] = useState<{
+    leftPlayer: PlayerSlugRow;
+    rightCandidate: PlayerSlugRow["mergeCandidates"][number];
+  } | null>(null);
+  const [compareLoading, setCompareLoading] = useState(false);
+  const [compareError, setCompareError] = useState<string | null>(null);
+  const [comparePayload, setComparePayload] = useState<ComparePayload | null>(null);
+  const [compareCopyStatus, setCompareCopyStatus] = useState<string | null>(null);
 
   const latestRequestRef = useRef(0);
 
@@ -185,6 +468,24 @@ export function PlayerSlugBrowser() {
     ],
   );
 
+  const loadSourceProfiles = useCallback(async (canonicalKey: string): Promise<LoadedSourceProfiles> => {
+    const params = new URLSearchParams({
+      canonicalKey,
+    });
+    const response = await fetch(`/api/players/source-profiles?${params.toString()}`, {
+      cache: "no-store",
+    });
+    const payload = (await response.json()) as SourceProfilesApiResponse;
+    if (!response.ok || !payload.ok || !payload.canonical) {
+      throw new Error(payload.error ?? `HTTP ${response.status}`);
+    }
+
+    return {
+      canonical: payload.canonical,
+      members: payload.members ?? [],
+    };
+  }, []);
+
   const openProfileModal = useCallback(async (player: PlayerSlugRow) => {
     setProfileTarget(player);
     setProfileMembers([]);
@@ -192,22 +493,76 @@ export function PlayerSlugBrowser() {
     setProfileLoading(true);
 
     try {
-      const params = new URLSearchParams({
-        canonicalKey: player.canonicalKey,
-      });
-      const response = await fetch(`/api/players/source-profiles?${params.toString()}`, {
-        cache: "no-store",
-      });
-      const payload = (await response.json()) as SourceProfilesApiResponse;
-      if (!response.ok || !payload.ok) {
-        throw new Error(payload.error ?? `HTTP ${response.status}`);
-      }
-
-      setProfileMembers(payload.members ?? []);
+      const payload = await loadSourceProfiles(player.canonicalKey);
+      setProfileMembers(payload.members);
     } catch (fetchError) {
       setProfileError(fetchError instanceof Error ? fetchError.message : "unknown error");
     } finally {
       setProfileLoading(false);
+    }
+  }, [loadSourceProfiles]);
+
+  const openCompareModal = useCallback(
+    async (leftPlayer: PlayerSlugRow, rightCandidate: PlayerSlugRow["mergeCandidates"][number]) => {
+      setCompareTarget({ leftPlayer, rightCandidate });
+      setCompareLoading(true);
+      setCompareError(null);
+      setComparePayload(null);
+      setCompareCopyStatus(null);
+
+      try {
+        const [leftRaw, rightRaw] = await Promise.all([
+          loadSourceProfiles(leftPlayer.canonicalKey),
+          loadSourceProfiles(rightCandidate.otherCanonicalKey),
+        ]);
+
+        const left = summarizeCanonicalProfile(leftRaw);
+        const right = summarizeCanonicalProfile(rightRaw);
+
+        let countryCompatible: boolean | null = null;
+        const leftCountry = left.countries[0] ?? null;
+        const rightCountry = right.countries[0] ?? null;
+        if (leftCountry && rightCountry) {
+          const params = new URLSearchParams({ left: leftCountry, right: rightCountry });
+          const response = await fetch(`/api/countries/match?${params.toString()}`, {
+            cache: "no-store",
+          });
+          const payload = (await response.json()) as CountryMatchApiResponse;
+          if (response.ok && payload.ok) {
+            countryCompatible = payload.comparison?.compatible ?? null;
+          }
+        }
+
+        const evaluation = evaluateCloseness(left, right, countryCompatible);
+        setComparePayload({
+          leftRaw,
+          rightRaw,
+          left,
+          right,
+          evaluation,
+          countryCompatible,
+        });
+      } catch (fetchError) {
+        setCompareError(fetchError instanceof Error ? fetchError.message : "unknown error");
+      } finally {
+        setCompareLoading(false);
+      }
+    },
+    [loadSourceProfiles],
+  );
+
+  const copyCompareJson = useCallback(async (label: string, value: unknown) => {
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(value, null, 2));
+      setCompareCopyStatus(`${label} copied`);
+      window.setTimeout(() => {
+        setCompareCopyStatus((prev) => (prev === `${label} copied` ? null : prev));
+      }, 1500);
+    } catch {
+      setCompareCopyStatus("Copy failed");
+      window.setTimeout(() => {
+        setCompareCopyStatus((prev) => (prev === "Copy failed" ? null : prev));
+      }, 1500);
     }
   }, []);
 
@@ -456,10 +811,17 @@ export function PlayerSlugBrowser() {
                       <span>-</span>
                     ) : (
                       <div className="grid gap-2">
-                        {player.mergeCandidates.slice(0, 4).map((candidate) => (
-                          <div key={`${candidate.otherCanonicalKey}:${candidate.reason}`}>
+                        {player.mergeCandidates.slice(0, 4).map((candidate, index) => (
+                          <div key={`${candidate.otherCanonicalKey}:${candidate.reason}:${index}`}>
                             <strong>{candidate.otherName}</strong>
                             <div className="text-xs text-slate-500">{candidate.reason}</div>
+                            <button
+                              className="mt-1 h-7 rounded-md border border-slate-300 bg-white px-2 text-xs text-slate-700 hover:bg-slate-100"
+                              onClick={() => void openCompareModal(player, candidate)}
+                              type="button"
+                            >
+                              Compare closeness
+                            </button>
                           </div>
                         ))}
                       </div>
@@ -598,6 +960,186 @@ export function PlayerSlugBrowser() {
                     </article>
                   ))
                 )}
+              </div>
+            ) : null}
+          </div>
+        </section>
+      ) : null}
+
+      {compareTarget ? (
+        <section className="fixed inset-0 z-50 grid place-items-center bg-slate-950/45 p-4">
+          <div className="max-h-[90vh] w-[min(1100px,100%)] overflow-auto rounded-2xl border border-slate-300 bg-white p-4 shadow-xl">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="m-0 font-mono text-xs uppercase tracking-[0.12em] text-teal-700">
+                  Merge Closeness
+                </p>
+                <h3 className="m-0 text-2xl font-semibold text-slate-900">
+                  {compareTarget.leftPlayer.displayName} vs {compareTarget.rightCandidate.otherName}
+                </h3>
+                <p className="m-0 text-xs text-slate-600">{compareTarget.rightCandidate.reason}</p>
+              </div>
+              <button
+                className="h-9 rounded-lg border border-slate-300 bg-white px-3 text-xs text-slate-900 hover:bg-slate-100"
+                onClick={() => {
+                  setCompareTarget(null);
+                  setComparePayload(null);
+                  setCompareError(null);
+                }}
+                type="button"
+              >
+                Close
+              </button>
+            </div>
+
+            {compareLoading ? (
+              <p className="mt-4 mb-0 text-sm text-slate-600">Loading comparison...</p>
+            ) : null}
+            {compareError ? (
+              <p className="mt-4 mb-0 text-sm text-rose-700">Error: {compareError}</p>
+            ) : null}
+
+            {!compareLoading && !compareError && comparePayload ? (
+              <div className="mt-4 grid gap-4">
+                <article className="rounded-xl border border-slate-300 bg-slate-50 p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <strong className="text-slate-900">Closeness Score</strong>
+                    <span className="rounded-lg border border-slate-300 bg-white px-3 py-1 text-sm font-semibold text-slate-900">
+                      {comparePayload.evaluation.score}/100
+                    </span>
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {comparePayload.evaluation.checks.map((check) => (
+                      <span
+                        key={`${check.label}:${check.detail}`}
+                        className={`rounded-md border px-2 py-1 text-xs ${statusChipClass(check.status)}`}
+                      >
+                        {check.label}: {check.detail}
+                      </span>
+                    ))}
+                  </div>
+                </article>
+
+                <article className="overflow-x-auto rounded-xl border border-slate-300 bg-white">
+                  <table className="w-full border-collapse text-sm">
+                    <thead className="border-b border-slate-300 bg-slate-50 text-left">
+                      <tr>
+                        <th className="px-2 py-2">Field</th>
+                        <th className="px-2 py-2">{comparePayload.left.displayName}</th>
+                        <th className="px-2 py-2">{comparePayload.right.displayName}</th>
+                      </tr>
+                    </thead>
+                    <tbody className="[&_tr]:border-b [&_tr]:border-slate-200">
+                      <tr>
+                        <td className="px-2 py-2">Canonical Key</td>
+                        <td className="px-2 py-2"><code>{comparePayload.left.canonicalKey}</code></td>
+                        <td className="px-2 py-2"><code>{comparePayload.right.canonicalKey}</code></td>
+                      </tr>
+                      <tr>
+                        <td className="px-2 py-2">Name Key</td>
+                        <td className="px-2 py-2">{comparePayload.left.nameKey ?? "-"}</td>
+                        <td className="px-2 py-2">{comparePayload.right.nameKey ?? "-"}</td>
+                      </tr>
+                      <tr>
+                        <td className="px-2 py-2">Source IDs</td>
+                        <td className="px-2 py-2">{comparePayload.left.sourceIds.join(", ") || "-"}</td>
+                        <td className="px-2 py-2">{comparePayload.right.sourceIds.join(", ") || "-"}</td>
+                      </tr>
+                      <tr>
+                        <td className="px-2 py-2">Known Names</td>
+                        <td className="px-2 py-2">{comparePayload.left.names.join(", ") || "-"}</td>
+                        <td className="px-2 py-2">{comparePayload.right.names.join(", ") || "-"}</td>
+                      </tr>
+                      <tr>
+                        <td className="px-2 py-2">Countries</td>
+                        <td className="px-2 py-2">{comparePayload.left.countries.join(", ") || "-"}</td>
+                        <td className="px-2 py-2">{comparePayload.right.countries.join(", ") || "-"}</td>
+                      </tr>
+                      <tr>
+                        <td className="px-2 py-2">Genders</td>
+                        <td className="px-2 py-2">{comparePayload.left.genders.join(", ") || "-"}</td>
+                        <td className="px-2 py-2">{comparePayload.right.genders.join(", ") || "-"}</td>
+                      </tr>
+                      <tr>
+                        <td className="px-2 py-2">DOBs</td>
+                        <td className="px-2 py-2">{comparePayload.left.dobs.join(", ") || "-"}</td>
+                        <td className="px-2 py-2">{comparePayload.right.dobs.join(", ") || "-"}</td>
+                      </tr>
+                      <tr>
+                        <td className="px-2 py-2">Seasons/Years</td>
+                        <td className="px-2 py-2">{comparePayload.left.seasons.join(", ") || "-"}</td>
+                        <td className="px-2 py-2">{comparePayload.right.seasons.join(", ") || "-"}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </article>
+
+                <article className="rounded-xl border border-slate-300 bg-slate-50 p-3">
+                  <details>
+                    <summary className="cursor-pointer text-sm font-semibold text-slate-900">
+                      Raw JSON (for debugging/AI)
+                    </summary>
+                    <div className="mt-2 flex items-center justify-between gap-2">
+                      {compareCopyStatus ? (
+                        <p className="m-0 text-xs font-medium text-slate-700">{compareCopyStatus}</p>
+                      ) : (
+                        <span />
+                      )}
+                      <button
+                        className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+                        onClick={() => {
+                          void copyCompareJson("Both JSON", {
+                            left: comparePayload.leftRaw,
+                            right: comparePayload.rightRaw,
+                          });
+                        }}
+                        type="button"
+                      >
+                        Copy both
+                      </button>
+                    </div>
+                    <div className="mt-3 grid gap-3 md:grid-cols-2">
+                      <div>
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="m-0 text-xs font-semibold uppercase tracking-[0.08em] text-slate-600">
+                            Left
+                          </p>
+                          <button
+                            className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+                            onClick={() => {
+                              void copyCompareJson("Left JSON", comparePayload.leftRaw);
+                            }}
+                            type="button"
+                          >
+                            Copy
+                          </button>
+                        </div>
+                        <pre className="mt-1 max-h-72 overflow-auto rounded-md border border-slate-300 bg-white p-2 text-xs">
+                          {JSON.stringify(comparePayload.leftRaw, null, 2)}
+                        </pre>
+                      </div>
+                      <div>
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="m-0 text-xs font-semibold uppercase tracking-[0.08em] text-slate-600">
+                            Right
+                          </p>
+                          <button
+                            className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+                            onClick={() => {
+                              void copyCompareJson("Right JSON", comparePayload.rightRaw);
+                            }}
+                            type="button"
+                          >
+                            Copy
+                          </button>
+                        </div>
+                        <pre className="mt-1 max-h-72 overflow-auto rounded-md border border-slate-300 bg-white p-2 text-xs">
+                          {JSON.stringify(comparePayload.rightRaw, null, 2)}
+                        </pre>
+                      </div>
+                    </div>
+                  </details>
+                </article>
               </div>
             ) : null}
           </div>
