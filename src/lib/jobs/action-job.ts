@@ -99,6 +99,12 @@ export interface StartWTTAllTimeActionJobOptions {
   backgroundSourceJobId?: string;
 }
 
+export interface StartPlayersRegistryActionJobOptions {
+  failOnUnresolvedCandidates?: boolean;
+  backgroundReason?: string;
+  backgroundSourceJobId?: string;
+}
+
 export interface WTTFollowupStatus {
   scheduled: boolean;
   scheduledAt: string | null;
@@ -148,7 +154,7 @@ type ActionJobOptionsByType = {
   "ttbl-all-time": StartTTBLAllTimeActionJobOptions;
   wtt: StartWTTActionJobOptions;
   "wtt-all-time": StartWTTAllTimeActionJobOptions;
-  "players-registry": Record<string, never>;
+  "players-registry": StartPlayersRegistryActionJobOptions;
   "destroy-data": Record<string, never>;
 };
 
@@ -825,6 +831,7 @@ async function runActionJob<T extends ActionJobType>(
   status: ActionJobStatus,
   options: ActionJobOptionsByType[T],
 ): Promise<void> {
+  const jobSignal = getStore().cancelControllers.get(status.jobId)?.signal;
   status.state = "running";
   status.startedAt = nowIso();
   status.updatedAt = status.startedAt;
@@ -858,6 +865,7 @@ async function runActionJob<T extends ActionJobType>(
         delayMs: opts.delayMs,
         includeYouth: opts.includeYouth ?? false,
         onLog: (message) => appendWorkerLog(status, message),
+        signal: jobSignal,
       });
       throwIfJobCancelled(status);
       emit(status, "API", "Rebuilding player registry after TTBL scrape.");
@@ -919,6 +927,7 @@ async function runActionJob<T extends ActionJobType>(
         delayMs: opts.delayMs,
         includeYouth: opts.includeYouth ?? false,
         onLog: (message) => appendWorkerLog(status, message),
+        signal: jobSignal,
       });
       throwIfJobCancelled(status);
       emit(status, "API", "Rebuilding player registry after TTBL scrape.");
@@ -984,6 +993,7 @@ async function runActionJob<T extends ActionJobType>(
         delayMs: opts.delayMs,
         includeYouth: opts.includeYouth ?? false,
         onLog: (message) => appendWorkerLog(status, message),
+        signal: jobSignal,
       });
       throwIfJobCancelled(status);
       emit(status, "API", "Rebuilding player registry after TTBL all-time scrape.");
@@ -1185,10 +1195,19 @@ async function runActionJob<T extends ActionJobType>(
       }
       status.result = { result, players, followup };
     } else if (status.type === "players-registry") {
+      const opts = options as StartPlayersRegistryActionJobOptions;
       emit(status, "API", "Starting player registry rebuild.");
-      const registry = await rebuildPlayerRegistry((message) => appendWorkerLog(status, message));
+      const registry = await rebuildPlayerRegistry(
+        (message) => appendWorkerLog(status, message),
+        {
+          failOnUnresolvedCandidates: opts.failOnUnresolvedCandidates === true,
+        },
+      );
       status.result = {
         registry,
+        strict: opts.failOnUnresolvedCandidates === true,
+        backgroundReason: opts.backgroundReason ?? null,
+        backgroundSourceJobId: opts.backgroundSourceJobId ?? null,
       };
     } else {
       emit(status, "API", "Destroying stored relational data.");
@@ -1236,7 +1255,7 @@ async function runActionJob<T extends ActionJobType>(
     emit(status, "SYSTEM", "Job completed successfully.");
   } catch (error) {
     status.state = "failed";
-    const cancelled = error instanceof ActionJobCancelledError;
+    const cancelled = error instanceof ActionJobCancelledError || Boolean(getCancellationReason(status.jobId));
     status.error = error instanceof Error ? error.message : "unknown error";
     status.finishedAt = nowIso();
     status.updatedAt = status.finishedAt;

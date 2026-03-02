@@ -1,8 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
-import { PlayerGender, PlayerSlugRow } from "@/lib/types";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { PlayerGender, PlayerSlugRow, PlayerSourceMemberDetail } from "@/lib/types";
 
 const PAGE_SIZE = 30;
 
@@ -46,12 +46,43 @@ interface PlayersApiResponse {
   error?: string;
 }
 
+interface SourceProfilesApiResponse {
+  ok: boolean;
+  canonical?: {
+    canonicalKey: string;
+    displayName: string;
+  };
+  members?: PlayerSourceMemberDetail[];
+  error?: string;
+}
+
 function fmtRate(value: number | null): string {
   if (value === null) {
     return "-";
   }
 
   return `${value.toFixed(1)}%`;
+}
+
+function formatNullable(value: string | number | null | undefined): string {
+  if (value === null || value === undefined || value === "") {
+    return "-";
+  }
+
+  return String(value);
+}
+
+function formatBirthday(unixSeconds: number | null | undefined): string {
+  if (typeof unixSeconds !== "number" || !Number.isFinite(unixSeconds)) {
+    return "-";
+  }
+
+  const date = new Date(unixSeconds * 1000);
+  if (Number.isNaN(date.getTime())) {
+    return "-";
+  }
+
+  return date.toISOString().slice(0, 10);
 }
 
 export function PlayerSlugBrowser() {
@@ -79,8 +110,17 @@ export function PlayerSlugBrowser() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const [profileTarget, setProfileTarget] = useState<PlayerSlugRow | null>(null);
+  const [profileMembers, setProfileMembers] = useState<PlayerSourceMemberDetail[]>([]);
+  const [profileLoading, setProfileLoading] = useState(false);
+  const [profileError, setProfileError] = useState<string | null>(null);
+
+  const latestRequestRef = useRef(0);
+
   const fetchPage = useCallback(
     async (offset: number, append: boolean) => {
+      const requestId = latestRequestRef.current + 1;
+      latestRequestRef.current = requestId;
       setLoading(true);
       setError(null);
 
@@ -108,6 +148,10 @@ export function PlayerSlugBrowser() {
           throw new Error(payload.error ?? `HTTP ${response.status}`);
         }
 
+        if (requestId !== latestRequestRef.current) {
+          return;
+        }
+
         setRows((prev) => (append ? [...prev, ...payload.players] : payload.players));
         setGeneratedAt(payload.generatedAt);
         setTotalFilteredPlayers(payload.page.total);
@@ -118,9 +162,14 @@ export function PlayerSlugBrowser() {
         setCountries(payload.filterOptions.countries);
         setSeasonsAndYears(payload.filterOptions.seasonsAndYears);
       } catch (fetchError) {
+        if (requestId !== latestRequestRef.current) {
+          return;
+        }
         setError(fetchError instanceof Error ? fetchError.message : "unknown error");
       } finally {
-        setLoading(false);
+        if (requestId === latestRequestRef.current) {
+          setLoading(false);
+        }
       }
     },
     [
@@ -136,6 +185,32 @@ export function PlayerSlugBrowser() {
     ],
   );
 
+  const openProfileModal = useCallback(async (player: PlayerSlugRow) => {
+    setProfileTarget(player);
+    setProfileMembers([]);
+    setProfileError(null);
+    setProfileLoading(true);
+
+    try {
+      const params = new URLSearchParams({
+        canonicalKey: player.canonicalKey,
+      });
+      const response = await fetch(`/api/players/source-profiles?${params.toString()}`, {
+        cache: "no-store",
+      });
+      const payload = (await response.json()) as SourceProfilesApiResponse;
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload.error ?? `HTTP ${response.status}`);
+      }
+
+      setProfileMembers(payload.members ?? []);
+    } catch (fetchError) {
+      setProfileError(fetchError instanceof Error ? fetchError.message : "unknown error");
+    } finally {
+      setProfileLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     void fetchPage(0, false);
   }, [fetchPage]);
@@ -146,13 +221,14 @@ export function PlayerSlugBrowser() {
         <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
           <div>
             <p className="m-0 font-mono text-xs uppercase tracking-[0.12em] text-teal-700">
-              Player Slug View
+              TTBL + WTT Players
             </p>
             <h1 className="m-0 text-3xl font-semibold leading-tight text-slate-900">
-              Canonical Player Rollup
+              Player Explorer & Source Audit
             </h1>
             <p className="mt-2 mb-0 max-w-3xl text-sm text-slate-600">
-              Server-side filters + sorting, loaded in pages of {PAGE_SIZE}.
+              Server-side filters + sorting, loaded in pages of {PAGE_SIZE}. Country matching is
+              alias-aware (for example DEU/GER, NGA/NGR, and AIN/RUS compatibility).
             </p>
           </div>
           <div className="flex gap-2">
@@ -350,6 +426,15 @@ export function PlayerSlugBrowser() {
                         {player.displayName}
                       </Link>
                     </strong>
+                    <div className="mt-1">
+                      <button
+                        className="h-7 rounded-md border border-slate-300 bg-white px-2 text-xs text-slate-700 hover:bg-slate-100"
+                        onClick={() => void openProfileModal(player)}
+                        type="button"
+                      >
+                        Source profiles
+                      </button>
+                    </div>
                     <div className="text-xs text-slate-500">
                       {player.sources.join(", ")} | {player.sourceIds.length} source IDs
                     </div>
@@ -402,7 +487,7 @@ export function PlayerSlugBrowser() {
                               </Link>
                             </strong>
                             <div className="text-xs text-slate-500">
-                              {match.outcome ?? "-"} {match.score ?? "-"} vs{" "}
+                              {match.outcome ?? "-"} {match.score ?? "-"} vs {" "}
                               {match.opponent ?? "unknown opponent"}
                             </div>
                             <div className="text-xs text-slate-500">
@@ -432,6 +517,92 @@ export function PlayerSlugBrowser() {
           </button>
         </div>
       </section>
+
+      {profileTarget ? (
+        <section className="fixed inset-0 z-50 grid place-items-center bg-slate-950/45 p-4">
+          <div className="max-h-[90vh] w-[min(980px,100%)] overflow-auto rounded-2xl border border-slate-300 bg-white p-4 shadow-xl">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="m-0 font-mono text-xs uppercase tracking-[0.12em] text-teal-700">
+                  Source Profiles
+                </p>
+                <h3 className="m-0 text-2xl font-semibold text-slate-900">{profileTarget.displayName}</h3>
+                <p className="m-0 text-xs text-slate-600">
+                  <code>{profileTarget.canonicalKey}</code>
+                </p>
+              </div>
+              <button
+                className="h-9 rounded-lg border border-slate-300 bg-white px-3 text-xs text-slate-900 hover:bg-slate-100"
+                onClick={() => {
+                  setProfileTarget(null);
+                  setProfileMembers([]);
+                  setProfileError(null);
+                }}
+                type="button"
+              >
+                Close
+              </button>
+            </div>
+
+            {profileLoading ? <p className="mt-4 mb-0 text-sm text-slate-600">Loading source profiles...</p> : null}
+            {profileError ? <p className="mt-4 mb-0 text-sm text-rose-700">Error: {profileError}</p> : null}
+
+            {!profileLoading && !profileError ? (
+              <div className="mt-4 grid gap-3">
+                {profileMembers.length === 0 ? (
+                  <p className="m-0 text-sm text-slate-600">No source profiles found.</p>
+                ) : (
+                  profileMembers.map((member) => (
+                    <article
+                      key={`${member.source}:${member.sourceId}:${member.sourceKey}`}
+                      className="rounded-xl border border-slate-300 bg-slate-50 p-3"
+                    >
+                      <div className="grid gap-1 text-sm text-slate-700">
+                        <div>
+                          <strong>Source:</strong> {member.source.toUpperCase()} | <strong>ID:</strong> <code>{member.sourceId}</code>
+                        </div>
+                        <div>
+                          <strong>Names:</strong> {member.names.join(", ")}
+                        </div>
+                        <div>
+                          <strong>Seasons:</strong> {member.seasons.length > 0 ? member.seasons.join(", ") : "-"}
+                        </div>
+                      </div>
+
+                      {member.source === "ttbl" ? (
+                        member.ttblProfile ? (
+                          <div className="mt-3 grid gap-2 text-sm text-slate-700 md:grid-cols-2">
+                            <div><strong>Nationality:</strong> {formatNullable(member.ttblProfile.nationality)}</div>
+                            <div><strong>Birthday:</strong> {formatBirthday(member.ttblProfile.birthdayUnix)}</div>
+                            <div><strong>Current Club:</strong> {formatNullable(member.ttblProfile.currentClub)}</div>
+                            <div><strong>Season Label:</strong> {formatNullable(member.ttblProfile.seasonLabel)}</div>
+                            <div><strong>Stable Player ID:</strong> {formatNullable(member.ttblProfile.stablePlayerId)}</div>
+                          </div>
+                        ) : (
+                          <p className="mt-3 mb-0 text-sm text-slate-600">TTBL profile fields not yet cached for this source ID.</p>
+                        )
+                      ) : member.wttProfile ? (
+                        <div className="mt-3 grid gap-2 text-sm text-slate-700 md:grid-cols-2">
+                          <div><strong>WTT Full Name:</strong> {formatNullable(member.wttProfile.full_name)}</div>
+                          <div><strong>Nationality:</strong> {formatNullable(member.wttProfile.nationality)}</div>
+                          <div><strong>Country Name:</strong> {formatNullable(member.wttProfile.country_name)}</div>
+                          <div><strong>DOB:</strong> {formatNullable(member.wttProfile.dob)}</div>
+                          <div><strong>Gender:</strong> {formatNullable(member.wttProfile.gender)}</div>
+                          <div><strong>Organization:</strong> {formatNullable(member.wttProfile.organization_name)}</div>
+                          <div><strong>World Ranking:</strong> {formatNullable(member.wttProfile.world_ranking)}</div>
+                          <div><strong>Career Matches:</strong> {member.wttProfile.stats.matches_played}</div>
+                        </div>
+                      ) : (
+                        <p className="mt-3 mb-0 text-sm text-slate-600">WTT profile fields not found for this source ID.</p>
+                      )}
+                    </article>
+                  ))
+                )}
+              </div>
+            ) : null}
+          </div>
+        </section>
+      ) : null}
     </main>
   );
 }

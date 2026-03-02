@@ -33,6 +33,32 @@ interface ApiEnvelope {
   logs?: string[];
 }
 
+interface CancelApiEnvelope {
+  ok: boolean;
+  error?: string;
+  cancelledAt?: string;
+  requested?: {
+    jobId?: string | null;
+    target?: string | null;
+    includeQueued?: boolean;
+    clearFollowups?: boolean;
+    reason?: string;
+  };
+  single?: {
+    found?: boolean;
+    alreadyTerminal?: boolean;
+    status?: {
+      jobId: string;
+      type: string;
+      state: string;
+    } | null;
+  } | null;
+  cancelled?: {
+    cancelled?: Array<{ jobId: string; type: string; state: string }>;
+    count?: number;
+  } | null;
+}
+
 const ACTION_JOB_POLL_MS = 1200;
 const OVERVIEW_POLL_MS = 10000;
 const FRONTEND_MASTER_PASSWORD =
@@ -150,8 +176,12 @@ export function Dashboard({ initialOverview }: DashboardProps) {
   const [actionLogTitle, setActionLogTitle] = useState("No action has been run yet.");
   const [actionLogs, setActionLogs] = useState<string[]>([]);
   const [actionJobId, setActionJobId] = useState<string | null>(null);
+  const [cancelBusy, setCancelBusy] = useState(false);
 
   const actionPollTimerRef = useRef<number | null>(null);
+  const appendUiLog = useCallback((message: string): void => {
+    setActionLogs((prev) => [...prev, `[${new Date().toISOString()}] [UI] ${message}`]);
+  }, []);
 
   const topRegistryPlayers = useMemo(
     () => (overview.players?.players ?? []).slice(0, 12),
@@ -262,7 +292,11 @@ export function Dashboard({ initialOverview }: DashboardProps) {
           throw new Error(payload.error ?? `Failed polling ${key} (${response.status})`);
         }
 
-        setActionLogs(payload.status.logs ?? []);
+        if ((payload.status.logs ?? []).length > 0) {
+          setActionLogs(payload.status.logs ?? []);
+        } else {
+          appendUiLog(`${key} status polled (${payload.status.state}) with no worker logs yet.`);
+        }
         setActionJobId(payload.status.jobId);
 
         if (payload.status.state === "queued") {
@@ -314,7 +348,7 @@ export function Dashboard({ initialOverview }: DashboardProps) {
         );
       }
     },
-    [clearActionPollTimer, refreshOverview],
+    [appendUiLog, clearActionPollTimer, refreshOverview],
   );
 
   async function invoke(
@@ -340,19 +374,31 @@ export function Dashboard({ initialOverview }: DashboardProps) {
       const payload = (await response.json()) as ApiEnvelope;
       if (!response.ok || !payload.ok || !payload.status || !payload.jobId) {
         const message = payload.error ?? `Failed to start ${key} (${response.status})`;
-        setActionLogs((prev) => [
-          ...prev,
-          `[${new Date().toISOString()}] [UI] ${key} failed to start: ${message}`,
-        ]);
+        appendUiLog(`${key} failed to start: ${message}`);
         setBusyKey(null);
         setActivity(`${key} failed: ${message}`);
         return;
       }
 
       setActionJobId(payload.jobId);
-      setActionLogs(payload.status.logs ?? []);
+      if ((payload.status.logs ?? []).length > 0) {
+        setActionLogs(payload.status.logs ?? []);
+      } else {
+        appendUiLog(`${key} accepted as job ${payload.jobId} (${payload.status.state}).`);
+      }
 
       if (payload.alreadyRunning) {
+        const activeType = payload.status.type ?? "unknown";
+        if (key === "Merge refresh" && activeType !== "players-registry") {
+          appendUiLog(
+            `Merge refresh did not start because active ${activeType} job ${payload.jobId} is running.`,
+          );
+          setBusyKey(null);
+          setActivity(
+            `Merge refresh waiting: active ${activeType} job ${payload.jobId} is running.`,
+          );
+          return;
+        }
         setActivity(`Joined existing ${key} job ${payload.jobId}.`);
       } else {
         setActivity(`${key} job ${payload.jobId} started.`);
@@ -381,14 +427,7 @@ export function Dashboard({ initialOverview }: DashboardProps) {
     } catch (error) {
       clearActionPollTimer();
       setBusyKey(null);
-      setActionLogs((prev) =>
-        [
-          ...prev,
-          `[${new Date().toISOString()}] [UI] ${key} failed: ${
-            error instanceof Error ? error.message : "unknown error"
-          }`,
-        ],
-      );
+      appendUiLog(`${key} failed: ${error instanceof Error ? error.message : "unknown error"}`);
       setActivity(
         `${key} failed: ${error instanceof Error ? error.message : "unknown error"}`,
       );
@@ -520,12 +559,75 @@ export function Dashboard({ initialOverview }: DashboardProps) {
     );
   }
 
+  async function onRefreshMergeRegistryStrict() {
+    await invoke(
+      "/api/players/registry",
+      {
+        strict: true,
+      },
+      "Merge refresh",
+      "/api/players/registry",
+    );
+  }
+
+  async function onCancelActiveJob() {
+    setCancelBusy(true);
+    setShowActionLog(true);
+    setActionLogTitle("Cancel log");
+    appendUiLog("Cancel active job requested from dashboard header.");
+
+    try {
+      const params = new URLSearchParams({
+        cancel: "1",
+        includeQueued: "1",
+        clearFollowups: "0",
+        reason: "Cancelled from dashboard header button.",
+      });
+      const response = await fetch(`/api/mcp?${params.toString()}`, {
+        method: "DELETE",
+      });
+      const payload = (await response.json()) as CancelApiEnvelope;
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload.error ?? `Cancel request failed (${response.status})`);
+      }
+
+      const cancelledCount = payload.cancelled?.count ?? 0;
+      const singleState = payload.single?.status?.state ?? null;
+      if (singleState) {
+        appendUiLog(`Cancellation requested for job ${payload.single?.status?.jobId} (${singleState}).`);
+      } else if (cancelledCount > 0) {
+        appendUiLog(`Cancellation requested for ${cancelledCount} active job(s).`);
+      } else {
+        appendUiLog("No active jobs were running to cancel.");
+      }
+
+      clearActionPollTimer();
+      setBusyKey(null);
+      setActionJobId(null);
+      await refreshOverview();
+      setActivity(
+        cancelledCount > 0 || singleState
+          ? "Cancellation requested. Check Last Action Log for final status."
+          : "No active jobs to cancel.",
+      );
+    } catch (error) {
+      appendUiLog(
+        `Cancel active job failed: ${error instanceof Error ? error.message : "unknown error"}`,
+      );
+      setActivity(
+        `Cancel active job failed: ${error instanceof Error ? error.message : "unknown error"}`,
+      );
+    } finally {
+      setCancelBusy(false);
+    }
+  }
+
   return (
     <main className="dashboard-shell">
       <section className="hero-grid panel fade-in">
         <div>
           <p className="eyebrow">TTBL + ITTF/WTT</p>
-          <h1 className="title">Scraper Control Deck</h1>
+          <h1 className="title">Scraper Control Deck + Job Control</h1>
           <p className="lede">
             This app only scrapes and combines source data.
           </p>
@@ -545,6 +647,14 @@ export function Dashboard({ initialOverview }: DashboardProps) {
             <strong>{activity}</strong>
           </p>
           <p>
+            Active Job
+            <strong>
+              {actionJobId
+                ? `${busyKey ?? "running"} (${actionJobId})`
+                : "none tracked in this session"}
+            </strong>
+          </p>
+          <p>
             TTBL Background
             <strong>
               {overview.sync.ttblFollowup.scheduled
@@ -560,6 +670,14 @@ export function Dashboard({ initialOverview }: DashboardProps) {
                 : "idle"}
             </strong>
           </p>
+          <button
+            className="danger-button"
+            disabled={cancelBusy}
+            onClick={onCancelActiveJob}
+            type="button"
+          >
+            {cancelBusy ? "Cancelling..." : "Cancel active job"}
+          </button>
         </div>
       </section>
 
@@ -732,11 +850,23 @@ export function Dashboard({ initialOverview }: DashboardProps) {
         <p className="hint">
           Merge candidates below are unresolved/ambiguous identity cases discovered during automatic linking.
         </p>
+        <p className="hint">
+          Trigger this from UI or from a background lambda by calling
+          <code> POST /api/players/registry</code> with <code>{`{"strict": true}`}</code>.
+          Strict mode fails the job when unresolved candidates remain.
+        </p>
+        <button
+          disabled={busyKey !== null}
+          onClick={onRefreshMergeRegistryStrict}
+          type="button"
+        >
+          {busyKey === "Merge refresh" ? "Running..." : "Refresh merge registry (strict)"}
+        </button>
       </section>
 
       <section className="panel">
         <h2>Last Action Log</h2>
-        <p className="hint">Live logs from TTBL, WTT, WTT full refresh, master sync, and destroy-data runs.</p>
+        <p className="hint">Live logs from TTBL, WTT, WTT full refresh, merge refresh, master sync, and destroy-data runs.</p>
         <p className="hint">
           <strong>{actionLogTitle}</strong>
         </p>

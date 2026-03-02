@@ -1,5 +1,10 @@
 import { getPrismaClient } from "@/lib/db/prisma";
 import {
+  areCountriesCompatible,
+  describeCountry,
+  listCountryMappings,
+} from "@/lib/normalization/country";
+import {
   getPlayerFieldMappingContract,
   normalizeCanonicalField,
 } from "@/lib/normalization/field-mapping";
@@ -1028,6 +1033,30 @@ async function toolFieldMapping(args: JsonObject): Promise<unknown> {
   throw new Error("mode must be 'describe' or 'normalize'");
 }
 
+async function toolMatchCountry(args: JsonObject): Promise<unknown> {
+  const value = typeof args.value === "string" ? args.value : null;
+  const left = typeof args.left === "string" ? args.left : null;
+  const right = typeof args.right === "string" ? args.right : null;
+  const includeCatalog = args.includeCatalog === true;
+
+  if (!value && (!left || !right) && !includeCatalog) {
+    throw new Error("Provide value, left+right, or includeCatalog=true.");
+  }
+
+  return {
+    value: value ? describeCountry(value) : null,
+    comparison:
+      left && right
+        ? {
+            left: describeCountry(left),
+            right: describeCountry(right),
+            compatible: areCountriesCompatible(left, right),
+          }
+        : null,
+    catalog: includeCatalog ? listCountryMappings() : null,
+  };
+}
+
 const tools: Array<MCPToolDefinition & { handler: ToolHandler }> = [
   {
     name: "get_overview",
@@ -1239,6 +1268,22 @@ const tools: Array<MCPToolDefinition & { handler: ToolHandler }> = [
       },
     },
     handler: async (args, ctx) => await toolHealthCheck(args, ctx),
+  },
+  {
+    name: "match_country",
+    description:
+      "Normalize/compare country values and aliases (codes + names), including compatibility checks.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        value: { type: "string" },
+        left: { type: "string" },
+        right: { type: "string" },
+        includeCatalog: { type: "boolean" },
+      },
+    },
+    handler: async (args) => await toolMatchCountry(args),
   },
   {
     name: "field_mapping",

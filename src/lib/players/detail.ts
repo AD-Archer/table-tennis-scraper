@@ -5,21 +5,12 @@ import { getTTBLPlayerProfile, readTTBLPlayerProfiles } from "@/lib/ttbl/player-
 import { fetchWTTPublicProfile, mergeWTTPublicProfile } from "@/lib/wtt/public-profile";
 import {
   CanonicalPlayer,
+  PlayerSourceMemberDetail,
   PlayerSlugMatchEntry,
   PlayerSlugRow,
   TTBLPlayerProfile,
   WTTPlayer,
 } from "@/lib/types";
-
-export interface PlayerSourceMemberDetail {
-  source: "ttbl" | "wtt";
-  sourceId: string;
-  sourceKey: string;
-  names: string[];
-  seasons: string[];
-  ttblProfile: TTBLPlayerProfile | null;
-  wttProfile: WTTPlayer | null;
-}
 
 export interface PlayerDetailView {
   player: PlayerSlugRow;
@@ -206,61 +197,29 @@ function wttProfileNeedsHydration(profile: WTTPlayer | null): boolean {
   );
 }
 
-export async function getPlayerDetailBySlug(slug: string): Promise<PlayerDetailView | null> {
-  const targetSlug = slug.trim();
-  if (!targetSlug) {
-    return null;
-  }
-
+async function resolveSourceMembers(canonical: CanonicalPlayer): Promise<PlayerSourceMemberDetail[]> {
   const prisma = getPrismaClient();
   if (!prisma) {
     throw new Error("DATABASE_URL is required in Postgres mode.");
   }
 
-  const [overview, registry, wttPlayerRows, ttblProfiles] = await Promise.all([
-    getPlayerSlugOverview(Number.MAX_SAFE_INTEGER),
-    ensurePlayerRegistry(),
-    prisma.wttPlayer.findMany(),
+  const wttIds = canonical.members
+    .filter((member) => member.source === "wtt")
+    .map((member) => member.sourceId.trim())
+    .filter(Boolean);
+  const [wttRows, ttblProfiles] = await Promise.all([
+    wttIds.length > 0
+      ? prisma.wttPlayer.findMany({
+          where: {
+            id: { in: [...new Set(wttIds)] },
+          },
+        })
+      : Promise.resolve([]),
     readTTBLPlayerProfiles(),
   ]);
 
-  const player = overview.players.find((row) => row.slug === targetSlug);
-  if (!player || !registry) {
-    return null;
-  }
-
-  const canonical = registry.players.find((row) => row.canonicalKey === player.canonicalKey);
-  if (!canonical) {
-    return null;
-  }
-
-  const opponentSlugBySourceId: Record<string, string> = {};
-  const ambiguousKeys = new Set<string>();
-  for (const row of overview.players) {
-    for (const token of row.sourceIds) {
-      const parsed = parseSourceToken(token);
-      if (!parsed || parsed.sourceId.startsWith("name:")) {
-        continue;
-      }
-
-      const key = `${parsed.source}:${parsed.sourceId}`;
-      const existing = opponentSlugBySourceId[key];
-      if (existing && existing !== row.slug) {
-        ambiguousKeys.add(key);
-        delete opponentSlugBySourceId[key];
-        continue;
-      }
-
-      if (!ambiguousKeys.has(key)) {
-        opponentSlugBySourceId[key] = row.slug;
-      }
-    }
-  }
-
   const members: PlayerSourceMemberDetail[] = [];
-  const wttById = Object.fromEntries(
-    wttPlayerRows.map((row) => [row.id, fromWTTPlayerRow(row)]),
-  );
+  const wttById = Object.fromEntries(wttRows.map((row) => [row.id, fromWTTPlayerRow(row)]));
   const ttblById = { ...ttblProfiles };
   let wttProfilesChanged = false;
 
@@ -313,6 +272,81 @@ export async function getPlayerDetailBySlug(slug: string): Promise<PlayerDetailV
   if (wttProfilesChanged) {
     await upsertWTTProfiles(wttById);
   }
+
+  return members;
+}
+
+export async function getPlayerSourceProfilesByCanonicalKey(
+  canonicalKey: string,
+): Promise<{
+  canonical: CanonicalPlayer;
+  members: PlayerSourceMemberDetail[];
+} | null> {
+  const targetCanonicalKey = canonicalKey.trim();
+  if (!targetCanonicalKey) {
+    return null;
+  }
+
+  const registry = await ensurePlayerRegistry();
+  if (!registry) {
+    return null;
+  }
+
+  const canonical =
+    registry.players.find((row) => row.canonicalKey === targetCanonicalKey) ?? null;
+  if (!canonical) {
+    return null;
+  }
+
+  const members = await resolveSourceMembers(canonical);
+  return { canonical, members };
+}
+
+export async function getPlayerDetailBySlug(slug: string): Promise<PlayerDetailView | null> {
+  const targetSlug = slug.trim();
+  if (!targetSlug) {
+    return null;
+  }
+
+  const [overview, registry] = await Promise.all([
+    getPlayerSlugOverview(Number.MAX_SAFE_INTEGER),
+    ensurePlayerRegistry(),
+  ]);
+
+  const player = overview.players.find((row) => row.slug === targetSlug);
+  if (!player || !registry) {
+    return null;
+  }
+
+  const canonical = registry.players.find((row) => row.canonicalKey === player.canonicalKey);
+  if (!canonical) {
+    return null;
+  }
+
+  const opponentSlugBySourceId: Record<string, string> = {};
+  const ambiguousKeys = new Set<string>();
+  for (const row of overview.players) {
+    for (const token of row.sourceIds) {
+      const parsed = parseSourceToken(token);
+      if (!parsed || parsed.sourceId.startsWith("name:")) {
+        continue;
+      }
+
+      const key = `${parsed.source}:${parsed.sourceId}`;
+      const existing = opponentSlugBySourceId[key];
+      if (existing && existing !== row.slug) {
+        ambiguousKeys.add(key);
+        delete opponentSlugBySourceId[key];
+        continue;
+      }
+
+      if (!ambiguousKeys.has(key)) {
+        opponentSlugBySourceId[key] = row.slug;
+      }
+    }
+  }
+
+  const members = await resolveSourceMembers(canonical);
 
   return {
     player,

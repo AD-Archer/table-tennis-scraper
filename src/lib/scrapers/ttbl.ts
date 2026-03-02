@@ -40,6 +40,7 @@ export interface TTBLScrapeOptions {
   outputDir?: string;
   includeYouth?: boolean;
   onLog?: (message: string) => void;
+  signal?: AbortSignal;
 }
 
 export interface TTBLScrapeResult {
@@ -59,6 +60,7 @@ export interface TTBLLegacyScrapeOptions {
   delayMs?: number;
   includeYouth?: boolean;
   onLog?: (message: string) => void;
+  signal?: AbortSignal;
 }
 
 export interface TTBLLegacyScrapeResult {
@@ -72,6 +74,7 @@ export interface TTBLDiscoverOptions {
   endYear?: number;
   delayMs?: number;
   onLog?: (message: string) => void;
+  signal?: AbortSignal;
 }
 
 export interface TTBLAllTimeScrapeOptions {
@@ -81,6 +84,7 @@ export interface TTBLAllTimeScrapeOptions {
   delayMs?: number;
   includeYouth?: boolean;
   onLog?: (message: string) => void;
+  signal?: AbortSignal;
 }
 
 export interface TTBLAllTimeScrapeResult {
@@ -251,12 +255,26 @@ function isTTBLPreMatchState(matchState: string): boolean {
   );
 }
 
-async function fetchText(url: string): Promise<string> {
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) {
+    return;
+  }
+
+  const reason =
+    typeof signal.reason === "string" && signal.reason.length > 0
+      ? signal.reason
+      : "Cancelled";
+  throw new Error(reason);
+}
+
+async function fetchTextWithSignal(url: string, signal?: AbortSignal): Promise<string> {
+  throwIfAborted(signal);
   const response = await fetch(url, {
     headers: {
       "user-agent": "TTBL-NextJS-Scraper/1.0",
     },
     cache: "no-store",
+    signal,
   });
 
   if (!response.ok) {
@@ -266,12 +284,14 @@ async function fetchText(url: string): Promise<string> {
   return response.text();
 }
 
-async function fetchJson<T>(url: string): Promise<T> {
+async function fetchJson<T>(url: string, signal?: AbortSignal): Promise<T> {
+  throwIfAborted(signal);
   const response = await fetch(url, {
     headers: {
       "user-agent": "TTBL-NextJS-Scraper/1.0",
     },
     cache: "no-store",
+    signal,
   });
 
   if (!response.ok) {
@@ -285,6 +305,7 @@ async function discoverSeasonGamedayCount(
   season: string,
   delayMs: number,
   onLog?: (message: string) => void,
+  signal?: AbortSignal,
 ): Promise<number> {
   emit(
     onLog,
@@ -295,10 +316,11 @@ async function discoverSeasonGamedayCount(
   let emptyStreak = 0;
 
   for (let gameday = 1; gameday <= AUTO_GAMEDAY_SCAN_MAX; gameday += 1) {
+    throwIfAborted(signal);
     const url = getScheduleUrl(season, gameday);
 
     try {
-      const html = await fetchText(url);
+      const html = await fetchTextWithSignal(url, signal);
       const allLinks = parseGamedayLinksFromHtml(html);
       const ids = parseMatchIdsFromHtml(html, season, gameday);
 
@@ -320,6 +342,7 @@ async function discoverSeasonGamedayCount(
         );
       }
     } catch (error) {
+      throwIfAborted(signal);
       emptyStreak += 1;
       const reason = error instanceof Error ? error.message : "unknown error";
       emit(onLog, `Auto-detect ${season}: gameday ${gameday} fetch failed: ${reason}`);
@@ -342,6 +365,7 @@ async function discoverSeasonGamedayCount(
     }
 
     if (delayMs > 0) {
+      throwIfAborted(signal);
       await sleep(delayMs);
     }
   }
@@ -354,6 +378,7 @@ async function discoverSeasonGamedayCount(
 export async function scrapeTTBLSeason(
   options: TTBLScrapeOptions = {},
 ): Promise<TTBLScrapeResult> {
+  throwIfAborted(options.signal);
   const season = options.season ?? DEFAULT_SEASON;
   const delayMs = options.delayMs ?? DEFAULT_DELAY_MS;
   const includeYouth = options.includeYouth ?? false;
@@ -365,6 +390,7 @@ export async function scrapeTTBLSeason(
       season,
       Math.min(delayMs, 120),
       options.onLog,
+      options.signal,
     ));
 
   const outputDir = options.outputDir ?? TTBL_OUTPUT_DIR;
@@ -388,10 +414,11 @@ export async function scrapeTTBLSeason(
   const failedGamedays: Array<{ gameday: number; reason: string }> = [];
 
   for (let gameday = 1; gameday <= numGamedays; gameday += 1) {
+    throwIfAborted(options.signal);
     const url = getScheduleUrl(season, gameday);
 
     try {
-      const html = await fetchText(url);
+      const html = await fetchTextWithSignal(url, options.signal);
       const allLinks = parseGamedayLinksFromHtml(html);
       const ids = parseMatchIdsFromHtml(html, season, gameday);
       if (ids.length === 0) {
@@ -407,11 +434,13 @@ export async function scrapeTTBLSeason(
 
       ids.forEach((id) => discoveredMatchIds.add(id));
     } catch (error) {
+      throwIfAborted(options.signal);
       const reason = error instanceof Error ? error.message : "unknown error";
       failedGamedays.push({ gameday, reason });
     }
 
     if (delayMs > 0) {
+      throwIfAborted(options.signal);
       await sleep(delayMs);
     }
 
@@ -444,9 +473,11 @@ export async function scrapeTTBLSeason(
   const acceptedMatchIds: string[] = [];
 
   for (const matchId of allMatchIds) {
+    throwIfAborted(options.signal);
     try {
       const rawMatch = await fetchJson<TTBLRawMatch>(
         `${TTBL_MATCH_ENDPOINT}/${matchId}`,
+        options.signal,
       );
 
       if (!matchBelongsToSeason(rawMatch, season)) {
@@ -591,11 +622,13 @@ export async function scrapeTTBLSeason(
         venue: rawMatch.venue?.name ?? "Unknown",
       });
     } catch {
+      throwIfAborted(options.signal);
       // Keep scraping if one match payload fails.
     } finally {
       processedMatchPayloads += 1;
 
       if (delayMs > 0) {
+        throwIfAborted(options.signal);
         await sleep(delayMs);
       }
 
@@ -633,6 +666,7 @@ export async function scrapeTTBLSeason(
     ).values(),
   );
 
+  throwIfAborted(options.signal);
   const profileHydration = await hydrateTTBLPlayerProfiles(
     uniquePlayers
       .map((row) => row.id ?? "")
@@ -678,6 +712,7 @@ export async function scrapeTTBLSeason(
     version: "nextjs-1.0",
   };
 
+  throwIfAborted(options.signal);
   await persistTTBLSnapshotToDb({
     metadata,
     matchSummaries,
@@ -687,6 +722,7 @@ export async function scrapeTTBLSeason(
     onLog: options.onLog,
   });
 
+  throwIfAborted(options.signal);
   await Promise.all([
     writeJson(path.join(outputDir, "metadata.json"), metadata),
     writeJson(path.join(outputDir, "players", "all_players.json"), allPlayers),
@@ -794,14 +830,18 @@ export async function discoverTTBLSeasons(
   );
 
   for (let year = endYear; year >= startYear; year -= 1) {
+    throwIfAborted(options.signal);
     const season = `${year}-${year + 1}`;
     const url = getScheduleUrl(season, 1);
 
     try {
-      const html = await fetchText(url);
+      const html = await fetchTextWithSignal(url, options.signal);
       const ids = parseMatchIdsFromHtml(html, season, 1);
       if (ids.length > 0) {
-        const sampleMatch = await fetchJson<TTBLRawMatch>(`${TTBL_MATCH_ENDPOINT}/${ids[0]}`);
+        const sampleMatch = await fetchJson<TTBLRawMatch>(
+          `${TTBL_MATCH_ENDPOINT}/${ids[0]}`,
+          options.signal,
+        );
         if (!matchBelongsToSeason(sampleMatch, season)) {
           emit(
             options.onLog,
@@ -813,10 +853,12 @@ export async function discoverTTBLSeasons(
         }
       }
     } catch {
+      throwIfAborted(options.signal);
       continue;
     }
 
     if (delayMs > 0) {
+      throwIfAborted(options.signal);
       await sleep(delayMs);
     }
   }
@@ -827,6 +869,7 @@ export async function discoverTTBLSeasons(
 export async function scrapeTTBLLegacySeasons(
   options: TTBLLegacyScrapeOptions,
 ): Promise<TTBLLegacyScrapeResult> {
+  throwIfAborted(options.signal);
   const uniqueSeasons = [...new Set(options.seasons.map((value) => value.trim()))].filter(
     (value) => value.length > 0,
   );
@@ -848,6 +891,7 @@ export async function scrapeTTBLLegacySeasons(
   const results: TTBLScrapeResult[] = [];
 
   for (const season of uniqueSeasons) {
+    throwIfAborted(options.signal);
     const seasonDir = path.join(TTBL_SEASONS_DIR, season);
     const result = await scrapeTTBLSeason({
       season,
@@ -856,6 +900,7 @@ export async function scrapeTTBLLegacySeasons(
       outputDir: seasonDir,
       includeYouth: options.includeYouth,
       onLog: options.onLog,
+      signal: options.signal,
     });
     results.push(result);
   }
@@ -888,12 +933,14 @@ export async function scrapeTTBLLegacySeasons(
 export async function scrapeTTBLAllTime(
   options: TTBLAllTimeScrapeOptions = {},
 ): Promise<TTBLAllTimeScrapeResult> {
+  throwIfAborted(options.signal);
   emit(options.onLog, "Starting all-time TTBL scrape.");
   const discoveredSeasons = await discoverTTBLSeasons({
     startYear: options.startYear,
     endYear: options.endYear,
     delayMs: options.delayMs,
     onLog: options.onLog,
+    signal: options.signal,
   });
   emit(options.onLog, `TTBL season discovery complete: ${discoveredSeasons.length} seasons.`);
 
@@ -903,6 +950,7 @@ export async function scrapeTTBLAllTime(
     delayMs: options.delayMs,
     includeYouth: options.includeYouth,
     onLog: options.onLog,
+    signal: options.signal,
   });
   const current =
     [...legacy.results].sort(

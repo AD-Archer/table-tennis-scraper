@@ -46,15 +46,36 @@ export async function GET(request: Request) {
   }
 }
 
-export async function POST() {
+export async function POST(request: Request) {
   try {
-    const { alreadyRunning, status } = startActionJob("players-registry", {});
+    let body: Record<string, unknown> = {};
+    try {
+      body = (await request.json()) as Record<string, unknown>;
+    } catch {
+      body = {};
+    }
+    const failOnUnresolvedCandidates = body.strict === true || body.failOnUnresolvedCandidates === true;
+    const backgroundReason =
+      typeof body.backgroundReason === "string" && body.backgroundReason.trim().length > 0
+        ? body.backgroundReason.trim()
+        : undefined;
+    const backgroundSourceJobId =
+      typeof body.backgroundSourceJobId === "string" && body.backgroundSourceJobId.trim().length > 0
+        ? body.backgroundSourceJobId.trim()
+        : undefined;
+
+    const { alreadyRunning, status } = startActionJob("players-registry", {
+      failOnUnresolvedCandidates,
+      backgroundReason,
+      backgroundSourceJobId,
+    });
 
     return NextResponse.json({
       ok: true,
       alreadyRunning,
       jobId: status.jobId,
       status,
+      strict: failOnUnresolvedCandidates,
     });
   } catch (error) {
     return NextResponse.json(

@@ -1,4 +1,9 @@
 import { NextResponse } from "next/server";
+import {
+  countryMatchesFilter,
+  countrySearchTokens,
+  normalizeCountryCode,
+} from "@/lib/normalization/country";
 import { getPlayerSlugOverview } from "@/lib/players/slugs";
 
 type SortBy = "matches" | "name" | "mergeCandidates";
@@ -60,6 +65,8 @@ export async function GET(request: Request) {
     const genderFilter = parseGenderFilter(url.searchParams.get("genderFilter"));
     const mergeFilter = parseMergeFilter(url.searchParams.get("mergeFilter"));
     const countryFilter = (url.searchParams.get("countryFilter") ?? "all").trim() || "all";
+    const normalizedCountryFilter =
+      countryFilter === "all" ? null : normalizeCountryCode(countryFilter);
     const seasonFilter = (url.searchParams.get("seasonFilter") ?? "all").trim() || "all";
     const minMatchesRaw = Number.parseInt(url.searchParams.get("minMatches") ?? "0", 10);
     const minMatches = Math.max(0, Number.isFinite(minMatchesRaw) ? minMatchesRaw : 0);
@@ -67,7 +74,13 @@ export async function GET(request: Request) {
     const queryNorm = normalize(query);
 
     const overview = await getPlayerSlugOverview();
-    const countries = [...new Set(overview.players.map((row) => row.country).filter(Boolean))]
+    const countries = [
+      ...new Set(
+        overview.players
+          .map((row) => normalizeCountryCode(row.country))
+          .filter(Boolean),
+      ),
+    ]
       .map((value) => value as string)
       .sort((a, b) => a.localeCompare(b));
     const seasonsAndYears = [
@@ -86,14 +99,20 @@ export async function GET(request: Request) {
         return false;
       }
 
-      if (sourceFilter === "ttbl" && !player.sources.includes("ttbl")) {
-        return false;
+      if (sourceFilter === "ttbl") {
+        if (!(player.sources.length === 1 && player.sources[0] === "ttbl")) {
+          return false;
+        }
       }
-      if (sourceFilter === "wtt" && !player.sources.includes("wtt")) {
-        return false;
+      if (sourceFilter === "wtt") {
+        if (!(player.sources.length === 1 && player.sources[0] === "wtt")) {
+          return false;
+        }
       }
-      if (sourceFilter === "cross-source" && player.sources.length < 2) {
-        return false;
+      if (sourceFilter === "cross-source") {
+        if (!(player.sources.includes("ttbl") && player.sources.includes("wtt"))) {
+          return false;
+        }
       }
 
       if (genderFilter !== "all" && player.gender !== genderFilter) {
@@ -107,7 +126,10 @@ export async function GET(request: Request) {
         return false;
       }
 
-      if (countryFilter !== "all" && player.country !== countryFilter) {
+      if (
+        normalizedCountryFilter &&
+        !countryMatchesFilter(player.country, normalizedCountryFilter)
+      ) {
         return false;
       }
 
@@ -128,6 +150,7 @@ export async function GET(request: Request) {
         player.canonicalKey,
         player.displayName,
         player.country ?? "",
+        countrySearchTokens(player.country).join(" "),
         player.gender,
         player.sourceIds.join(" "),
         player.seasons.join(" "),

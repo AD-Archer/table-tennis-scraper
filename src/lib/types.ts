@@ -266,6 +266,16 @@ export interface PlayerSlugOverview {
   players: PlayerSlugRow[];
 }
 
+export interface PlayerSourceMemberDetail {
+  source: "ttbl" | "wtt";
+  sourceId: string;
+  sourceKey: string;
+  names: string[];
+  seasons: string[];
+  ttblProfile: TTBLPlayerProfile | null;
+  wttProfile: WTTPlayer | null;
+}
+
 export interface TTBLPlayerProfile {
   sourcePlayerId: string;
   stablePlayerId: string | null;

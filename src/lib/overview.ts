@@ -86,6 +86,16 @@ const appEndpoints: EndpointRow[] = [
   },
   {
     method: "GET",
+    path: "/api/players/source-profiles",
+    description: "Read source profile snapshots (TTBL/WTT) for a canonical player key.",
+  },
+  {
+    method: "GET",
+    path: "/api/countries/match",
+    description: "Normalize and compare country names/codes (alias-aware).",
+  },
+  {
+    method: "GET",
     path: "/api/endpoints",
     description: "List scraper and registry endpoint references.",
   },

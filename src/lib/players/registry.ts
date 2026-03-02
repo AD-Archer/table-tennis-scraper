@@ -1,4 +1,9 @@
 import { getPrismaClient } from "@/lib/db/prisma";
+import {
+  areCountriesCompatible,
+  getCountryCompatibilityCodes,
+  normalizeCountryCode,
+} from "@/lib/normalization/country";
 import { getTTBLPlayerProfile, readTTBLPlayerProfiles } from "@/lib/ttbl/player-profiles";
 import {
   CanonicalPlayer,
@@ -18,6 +23,7 @@ interface SourcePlayerInput {
   canonicalHint?: string;
   season?: string;
   country?: string | null;
+  ttblClub?: string | null;
   dobIso?: string | null;
   gender?: PlayerGender | null;
 }
@@ -43,60 +49,12 @@ const DEFAULT_MANUAL_CONFIG: PlayerRegistryManualConfig = {
 };
 
 type RegistryLogFn = (message: string) => void;
+interface RebuildPlayerRegistryOptions {
+  failOnUnresolvedCandidates?: boolean;
+}
 
 const registryGlobal = globalThis as typeof globalThis & {
   __playerRegistrySnapshotCompat?: PlayerRegistrySnapshot | null;
-};
-
-const COUNTRY_CODE_ALIASES: Record<string, string> = {
-  GER: "DEU",
-  DEU: "DEU",
-  POR: "PRT",
-  PRT: "PRT",
-  DEN: "DNK",
-  DNK: "DNK",
-  ENG: "GBR",
-  GBR: "GBR",
-  CRO: "HRV",
-  HRV: "HRV",
-  TPE: "TWN",
-  TWN: "TWN",
-  NED: "NLD",
-  NLD: "NLD",
-  SUI: "CHE",
-  CHE: "CHE",
-  SLO: "SVN",
-  SVN: "SVN",
-  GRE: "GRC",
-  GRC: "GRC",
-  CZE: "CZE",
-  KOR: "KOR",
-  CHN: "CHN",
-  JPN: "JPN",
-  USA: "USA",
-  AUT: "AUT",
-  BEL: "BEL",
-  POL: "POL",
-  FRA: "FRA",
-  ESP: "ESP",
-  ITA: "ITA",
-};
-
-const COUNTRY_NAME_ALIASES: Record<string, string> = {
-  GERMANY: "DEU",
-  PORTUGAL: "PRT",
-  DENMARK: "DNK",
-  ENGLAND: "GBR",
-  "GREAT BRITAIN": "GBR",
-  CROATIA: "HRV",
-  TAIWAN: "TWN",
-  "CHINESE TAIPEI": "TWN",
-  NETHERLANDS: "NLD",
-  SWITZERLAND: "CHE",
-  SLOVENIA: "SVN",
-  GREECE: "GRC",
-  "KOREA REPUBLIC": "KOR",
-  "REPUBLIC OF KOREA": "KOR",
 };
 
 function getRegistryPrismaClient() {
@@ -194,14 +152,7 @@ function uniqueStableHintByName(rows: SourcePlayerInput[]): Map<string, string> 
 }
 
 function normalizeCountry(value: string | null | undefined): string | null {
-  const cleaned = cleanName(value ?? "");
-  if (!cleaned) {
-    return null;
-  }
-  const upper = cleaned.toUpperCase();
-  const compact = upper.replace(/[^A-Z]/g, "");
-
-  return COUNTRY_CODE_ALIASES[compact] ?? COUNTRY_NAME_ALIASES[upper] ?? upper;
+  return normalizeCountryCode(value);
 }
 
 function normalizeSourceGender(value: string | null | undefined): PlayerGender | null {
@@ -495,6 +446,7 @@ async function collectTTBLPlayersFromDb(
         canonicalHint: buildTTBLCanonicalHint(normalizedName, sourceProfile),
         season: row.season,
         country: normalizeCountry(sourceProfile?.nationality ?? null),
+        ttblClub: cleanName(sourceProfile?.currentClub ?? "") || null,
         dobIso: unixSecondsToIsoDate(sourceProfile?.birthdayUnix ?? null),
       });
     }
@@ -743,6 +695,10 @@ function autoConsolidateTTBLStableHints(
     const countryValues = [
       ...new Set(rows.map((row) => row.country ?? null).filter(Boolean)),
     ];
+    const clubValues = [
+      ...new Set(rows.map((row) => normalizeName(row.ttblClub ?? "")).filter(Boolean)),
+    ];
+    const seasonValues = [...new Set(rows.map((row) => row.season ?? "").filter(Boolean))];
     const rowsByStable = new Map<string, number>();
     for (const row of rows) {
       const key = row.canonicalHint ?? "";
@@ -755,7 +711,12 @@ function autoConsolidateTTBLStableHints(
       dobValues.length === 0 &&
       countryValues.length <= 1 &&
       (maxRowsPerStable > 1 || rows.length >= 3);
-    const canMerge = canMergeByDob || canMergeByNameCountryOnly;
+    const canMergeByProfileFingerprint =
+      dobValues.length === 0 &&
+      countryValues.length <= 1 &&
+      clubValues.length === 1 &&
+      seasonValues.length <= 1;
+    const canMerge = canMergeByDob || canMergeByNameCountryOnly || canMergeByProfileFingerprint;
 
     if (!canMerge) {
       const leftStable = stableKeys[0] ?? "ttbl:unknown";
@@ -767,6 +728,8 @@ function autoConsolidateTTBLStableHints(
           ? `conflicting DOB values (${dobValues.join(", ")})`
           : countryValues.length > 1
             ? `conflicting countries (${countryValues.join(", ")})`
+            : clubValues.length > 1
+              ? "conflicting clubs"
             : "insufficient evidence";
       issues.push({
         leftCanonicalKey: leftStable,
@@ -977,6 +940,7 @@ function autoLinkWTTToTTBL(
 
   const ttblByNameKey = new Map<string, Map<string, TTBLCandidate>>();
   const wttByNameKey = new Map<string, SourcePlayerInput[]>();
+  const rowsByWttSourceId = new Map<string, SourcePlayerInput[]>();
 
   for (const player of sourcePlayers) {
     const nameKey = buildNameKey(player.displayName, player.country);
@@ -1015,12 +979,20 @@ function autoLinkWTTToTTBL(
       const rows = wttByNameKey.get(nameKey) ?? [];
       rows.push(player);
       wttByNameKey.set(nameKey, rows);
+
+      const bySourceId = rowsByWttSourceId.get(player.sourceId) ?? [];
+      bySourceId.push(player);
+      rowsByWttSourceId.set(player.sourceId, bySourceId);
     }
   }
 
   let autoLinkedWTTIds = 0;
+  let autoLinkedWTTIdsFuzzy = 0;
   const issues: PlayerMergeCandidate[] = [];
   const issueDedupe = new Set<string>();
+
+  const scoreSourceRow = (row: SourcePlayerInput): number =>
+    (row.dobIso ? 4 : 0) + (row.country ? 2 : 0) + (row.gender ? 1 : 0);
 
   for (const [nameKey, wttRows] of wttByNameKey.entries()) {
     const ttblRows = [...(ttblByNameKey.get(nameKey)?.values() ?? [])];
@@ -1041,11 +1013,7 @@ function autoLinkWTTToTTBL(
       const wtt =
         rowsForSourceId
           .slice()
-          .sort((a, b) => {
-            const score = (row: SourcePlayerInput) =>
-              (row.dobIso ? 4 : 0) + (row.country ? 2 : 0) + (row.gender ? 1 : 0);
-            return score(b) - score(a);
-          })
+          .sort((a, b) => scoreSourceRow(b) - scoreSourceRow(a))
           .at(0) ?? null;
       if (!wtt || wtt.canonicalHint) {
         continue;
@@ -1053,7 +1021,9 @@ function autoLinkWTTToTTBL(
 
       const compatible = ttblRows.filter((ttbl) => {
         const countryCompatible =
-          !wtt.country || ttbl.countries.size === 0 || ttbl.countries.has(wtt.country);
+          !wtt.country ||
+          ttbl.countries.size === 0 ||
+          [...ttbl.countries].some((country) => areCountriesCompatible(country, wtt.country));
         const genderCompatible =
           !wtt.gender ||
           wtt.gender === "unknown" ||
@@ -1133,7 +1103,9 @@ function autoLinkWTTToTTBL(
       const hasCountryConflict =
         Boolean(wtt.country) &&
         ttblRows.every(
-          (ttbl) => ttbl.countries.size > 0 && !ttbl.countries.has(wtt.country ?? ""),
+          (ttbl) =>
+            ttbl.countries.size > 0 &&
+            ![...ttbl.countries].some((country) => areCountriesCompatible(country, wtt.country)),
         );
       const hasGenderConflict =
         Boolean(wtt.gender) &&
@@ -1163,7 +1135,167 @@ function autoLinkWTTToTTBL(
     }
   }
 
+  type TTBLSurnameCandidate = {
+    identityKey: string;
+    displayName: string;
+    surnames: Set<string>;
+    givenNames: Set<string>;
+    countries: Set<string>;
+    dobIsoValues: Set<string>;
+    genders: Set<PlayerGender>;
+  };
+
+  const ttblByIdentity = new Map<string, TTBLSurnameCandidate>();
+  for (const row of sourcePlayers) {
+    if (
+      row.source !== "ttbl" ||
+      !row.canonicalHint ||
+      (!row.canonicalHint.startsWith("ttbl-stable:") &&
+        !row.canonicalHint.startsWith("ttbl-profile:"))
+    ) {
+      continue;
+    }
+
+    const parts = parseNameParts(row.displayName, row.country);
+    if (!parts) {
+      continue;
+    }
+
+    const existing = ttblByIdentity.get(row.canonicalHint) ?? {
+      identityKey: row.canonicalHint,
+      displayName: row.displayName,
+      surnames: new Set<string>(),
+      givenNames: new Set<string>(),
+      countries: new Set<string>(),
+      dobIsoValues: new Set<string>(),
+      genders: new Set<PlayerGender>(),
+    };
+
+    existing.surnames.add(parts.surname);
+    if (parts.given) {
+      existing.givenNames.add(parts.given);
+    }
+    if (row.country) {
+      existing.countries.add(row.country);
+    }
+    if (row.dobIso) {
+      existing.dobIsoValues.add(row.dobIso);
+    }
+    if (row.gender && row.gender !== "unknown") {
+      existing.genders.add(row.gender);
+    }
+    if (!existing.displayName || existing.displayName === "Unknown") {
+      existing.displayName = row.displayName;
+    }
+
+    ttblByIdentity.set(row.canonicalHint, existing);
+  }
+
+  const unresolvedWttBySourceId = new Map<string, SourcePlayerInput[]>();
+  for (const [sourceId, rows] of rowsByWttSourceId.entries()) {
+    const unresolvedRows = rows.filter((row) => !row.canonicalHint);
+    if (unresolvedRows.length > 0) {
+      unresolvedWttBySourceId.set(sourceId, unresolvedRows);
+    }
+  }
+
+  const potentialTtblByWtt = new Map<string, Set<string>>();
+  const potentialWttByTtbl = new Map<string, Set<string>>();
+
+  for (const [wttSourceId, rows] of unresolvedWttBySourceId.entries()) {
+    const wtt = rows.slice().sort((a, b) => scoreSourceRow(b) - scoreSourceRow(a)).at(0) ?? null;
+    if (!wtt) {
+      continue;
+    }
+
+    const wttParts = parseNameParts(wtt.displayName, wtt.country);
+    if (!wttParts || !wttParts.surname || !wttParts.given) {
+      continue;
+    }
+
+    const candidates = [...ttblByIdentity.values()].filter((ttbl) => {
+      const surnameMatch = [...ttbl.surnames].some((surname) => surname === wttParts.surname);
+      if (!surnameMatch) {
+        return false;
+      }
+
+      const givenMatch = [...ttbl.givenNames].some((given) => givenNamesSimilar(given, wttParts.given));
+      if (!givenMatch) {
+        return false;
+      }
+
+      const countryCompatible =
+        !wtt.country ||
+        ttbl.countries.size === 0 ||
+        [...ttbl.countries].some((country) => areCountriesCompatible(country, wtt.country));
+      if (!countryCompatible) {
+        return false;
+      }
+
+      const genderCompatible =
+        !wtt.gender ||
+        wtt.gender === "unknown" ||
+        ttbl.genders.size === 0 ||
+        ttbl.genders.has(wtt.gender);
+      if (!genderCompatible) {
+        return false;
+      }
+
+      const hasHardDobConflict =
+        Boolean(wtt.dobIso) &&
+        ttbl.dobIsoValues.size > 0 &&
+        !ttbl.dobIsoValues.has(wtt.dobIso ?? "");
+      if (hasHardDobConflict) {
+        return false;
+      }
+
+      return true;
+    });
+
+    if (candidates.length === 0) {
+      continue;
+    }
+
+    const ttblKeys = new Set(candidates.map((candidate) => candidate.identityKey));
+    potentialTtblByWtt.set(wttSourceId, ttblKeys);
+    for (const ttblKey of ttblKeys) {
+      const wttKeys = potentialWttByTtbl.get(ttblKey) ?? new Set<string>();
+      wttKeys.add(wttSourceId);
+      potentialWttByTtbl.set(ttblKey, wttKeys);
+    }
+  }
+
+  for (const [wttSourceId, ttblKeys] of potentialTtblByWtt.entries()) {
+    if (ttblKeys.size !== 1) {
+      continue;
+    }
+
+    const ttblKey = [...ttblKeys][0];
+    if (!ttblKey) {
+      continue;
+    }
+
+    const reverse = potentialWttByTtbl.get(ttblKey);
+    if (!reverse || reverse.size !== 1 || !reverse.has(wttSourceId)) {
+      continue;
+    }
+
+    const rows = unresolvedWttBySourceId.get(wttSourceId) ?? [];
+    if (rows.length === 0) {
+      continue;
+    }
+
+    for (const row of rows) {
+      row.canonicalHint = ttblKey;
+    }
+    autoLinkedWTTIds += 1;
+    autoLinkedWTTIdsFuzzy += 1;
+  }
+
   emit(log, `Auto-linked WTT->TTBL players: ${autoLinkedWTTIds}.`);
+  if (autoLinkedWTTIdsFuzzy > 0) {
+    emit(log, `Auto-linked WTT->TTBL players via fuzzy name matching: ${autoLinkedWTTIdsFuzzy}.`);
+  }
   if (issues.length > 0) {
     emit(log, `Auto-link issues (unresolved): ${issues.length}.`);
   }
@@ -1267,7 +1399,10 @@ function buildMergeCandidates(players: CanonicalPlayer[]): PlayerMergeCandidate[
       continue;
     }
 
-    const signature = `${parsed.surname}|${parsed.country ?? "UNK"}|${parsed.givenInitial}`;
+    const countryKey = parsed.country
+      ? getCountryCompatibilityCodes(parsed.country).sort((a, b) => a.localeCompare(b)).join("|")
+      : "UNK";
+    const signature = `${parsed.surname}|${countryKey}|${parsed.givenInitial}`;
     const bucket = buckets.get(signature) ?? [];
     bucket.push({ player, parts: parsed });
     buckets.set(signature, bucket);
@@ -1297,7 +1432,7 @@ function buildMergeCandidates(players: CanonicalPlayer[]): PlayerMergeCandidate[
         if (
           left.parts.country &&
           right.parts.country &&
-          left.parts.country !== right.parts.country
+          !areCountriesCompatible(left.parts.country, right.parts.country)
         ) {
           continue;
         }
@@ -1340,6 +1475,7 @@ function buildMergeCandidates(players: CanonicalPlayer[]): PlayerMergeCandidate[
 
 function dedupeMergeCandidates(candidates: PlayerMergeCandidate[]): PlayerMergeCandidate[] {
   const seen = new Set<string>();
+  const seenCrossSourceByNames = new Set<string>();
   const out: PlayerMergeCandidate[] = [];
 
   for (const row of candidates) {
@@ -1356,6 +1492,19 @@ function dedupeMergeCandidates(candidates: PlayerMergeCandidate[]): PlayerMergeC
       continue;
     }
 
+    if (reason.startsWith("same surname +")) {
+      const names = [normalizeName(row.leftName), normalizeName(row.rightName)]
+        .filter(Boolean)
+        .sort((a, b) => a.localeCompare(b));
+      if (names.length === 2) {
+        const nameSignature = `${names[0]}::${names[1]}::${reason}`;
+        if (seenCrossSourceByNames.has(nameSignature)) {
+          continue;
+        }
+        seenCrossSourceByNames.add(nameSignature);
+      }
+    }
+
     seen.add(signature);
     out.push({
       leftCanonicalKey: leftKey,
@@ -1367,6 +1516,14 @@ function dedupeMergeCandidates(candidates: PlayerMergeCandidate[]): PlayerMergeC
   }
 
   return out;
+}
+
+function isInformationalMergeReason(reason: string): boolean {
+  const normalized = reason.trim().toLowerCase();
+  return (
+    normalized.startsWith("same surname + same given name (cross-source)") ||
+    normalized.startsWith("same surname + similar given name (cross-source)")
+  );
 }
 
 function toCanonicalArray(input: Map<string, MutableCanonical>): CanonicalPlayer[] {
@@ -1396,7 +1553,10 @@ function toCanonicalArray(input: Map<string, MutableCanonical>): CanonicalPlayer
   );
 }
 
-export async function rebuildPlayerRegistry(log?: RegistryLogFn): Promise<PlayerRegistrySnapshot> {
+export async function rebuildPlayerRegistry(
+  log?: RegistryLogFn,
+  options: RebuildPlayerRegistryOptions = {},
+): Promise<PlayerRegistrySnapshot> {
   emit(log, "Starting player registry rebuild.");
 
   const manual = await loadManualConfig();
@@ -1464,9 +1624,12 @@ export async function rebuildPlayerRegistry(log?: RegistryLogFn): Promise<Player
     ...wttConsolidationIssues,
     ...autoLinkIssues,
   ]).slice(0, 300);
+  const blockingCandidates = mergeCandidates.filter(
+    (row) => !isInformationalMergeReason(row.reason),
+  );
   emit(
     log,
-    `Built canonical map: canonical=${canonicalPlayers.length}, candidates=${mergeCandidates.length}`,
+    `Built canonical map: canonical=${canonicalPlayers.length}, candidates=${mergeCandidates.length}, blockingCandidates=${blockingCandidates.length}`,
   );
 
   const snapshot: PlayerRegistrySnapshot = {
@@ -1483,6 +1646,16 @@ export async function rebuildPlayerRegistry(log?: RegistryLogFn): Promise<Player
     mergeCandidates,
     sourceIndex,
   };
+
+  if (options.failOnUnresolvedCandidates && blockingCandidates.length > 0) {
+    const sample = blockingCandidates
+      .slice(0, 5)
+      .map((row) => `${row.leftName} <> ${row.rightName} (${row.reason})`)
+      .join(" | ");
+    throw new Error(
+      `Strict merge failed: ${blockingCandidates.length} blocking unresolved merge candidates remain.${sample ? ` Sample: ${sample}` : ""}`,
+    );
+  }
 
   const prisma = getRegistryPrismaClient();
   if (!hasRegistryTables(prisma)) {

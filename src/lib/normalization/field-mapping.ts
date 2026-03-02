@@ -1,4 +1,5 @@
 import { PlayerCountrySource, PlayerGender, PlayerGenderSource } from "@/lib/types";
+import { normalizeCountryCode } from "@/lib/normalization/country";
 
 export const PLAYER_FIELD_MAPPING_VERSION = "2026-02-27";
 
@@ -35,46 +36,6 @@ interface NormalizeFieldOptions {
   unit?: string | null;
 }
 
-const COUNTRY_NAME_TO_CODE: Record<string, string> = {
-  germany: "DEU",
-  deutschland: "DEU",
-  sweden: "SWE",
-  sverige: "SWE",
-  france: "FRA",
-  japan: "JPN",
-  china: "CHN",
-  korea: "KOR",
-  "south korea": "KOR",
-  "korea republic": "KOR",
-  austria: "AUT",
-  poland: "POL",
-  portugal: "POR",
-  spain: "ESP",
-  belgium: "BEL",
-  england: "ENG",
-  "united kingdom": "GBR",
-  "great britain": "GBR",
-  "united states": "USA",
-  usa: "USA",
-};
-
-const COUNTRY_2_TO_3: Record<string, string> = {
-  DE: "DEU",
-  SE: "SWE",
-  FR: "FRA",
-  JP: "JPN",
-  CN: "CHN",
-  KR: "KOR",
-  AT: "AUT",
-  PL: "POL",
-  PT: "POR",
-  ES: "ESP",
-  BE: "BEL",
-  GB: "GBR",
-  UK: "GBR",
-  US: "USA",
-};
-
 function cleanText(value: string): string {
   return value.replace(/\s+/g, " ").trim();
 }
@@ -96,32 +57,6 @@ function parseNumberish(value: unknown): number | null {
 
   const parsed = Number.parseFloat(match[0]);
   return Number.isFinite(parsed) ? parsed : null;
-}
-
-function normalizeCountryCode(value: unknown): string | null {
-  if (typeof value !== "string") {
-    return null;
-  }
-
-  const cleaned = cleanText(value);
-  if (!cleaned) {
-    return null;
-  }
-
-  const upper = cleaned.toUpperCase();
-  if (/^[A-Z]{3}$/.test(upper)) {
-    return upper;
-  }
-  if (/^[A-Z]{2}$/.test(upper)) {
-    return COUNTRY_2_TO_3[upper] ?? upper;
-  }
-
-  const code = COUNTRY_NAME_TO_CODE[cleaned.toLowerCase()];
-  if (code) {
-    return code;
-  }
-
-  return upper;
 }
 
 function normalizeGenderCode(value: unknown): PlayerGender | null {
