@@ -44,6 +44,9 @@ export const PLAYERS_OUTPUT_DIR = path.join(DATA_ROOT, "players");
 export const PLAYERS_REGISTRY_FILE = path.join(PLAYERS_OUTPUT_DIR, "player_registry.json");
 export const PLAYERS_MANUAL_FILE = path.join(PLAYERS_OUTPUT_DIR, "manual_merges.json");
 
+export const PIPELINE_DIR = path.join(DATA_ROOT, "pipeline");
+export const WTT_PIPELINE_STATE_FILE = path.join(PIPELINE_DIR, "wtt_state.json");
+
 interface TTBLLegacyIndexLike {
   seasons?: string[];
   results?: Array<{ season?: string }>;
