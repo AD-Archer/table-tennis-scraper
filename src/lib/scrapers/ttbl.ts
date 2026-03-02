@@ -1,4 +1,5 @@
 import path from "node:path";
+import { persistTTBLSnapshotToDb } from "@/lib/db/domain-persistence";
 import { ensureDir, readJson, sleep, writeJson, writeText } from "@/lib/fs";
 import { TTBL_LEGACY_INDEX_FILE, TTBL_OUTPUT_DIR, TTBL_SEASONS_DIR } from "@/lib/paths";
 import { hydrateTTBLPlayerProfiles } from "@/lib/ttbl/player-profiles";
@@ -21,12 +22,23 @@ const DEFAULT_DELAY_MS = 300;
 const AUTO_GAMEDAY_SCAN_MAX = 80;
 const AUTO_GAMEDAY_EMPTY_STREAK = 4;
 const AUTO_GAMEDAY_MIN_SCAN = 10;
+const CURRENT_ALIAS_JSON_FILES = [
+  "metadata.json",
+  "matches_summary.json",
+  path.join("players", "all_players.json"),
+  path.join("players", "unique_players.json"),
+  path.join("stats", "player_stats_final.json"),
+  path.join("stats", "games_data.json"),
+  path.join("stats", "top_players.json"),
+  path.join("stats", "match_states.json"),
+];
 
 export interface TTBLScrapeOptions {
   season?: string;
   numGamedays?: number;
   delayMs?: number;
   outputDir?: string;
+  includeYouth?: boolean;
   onLog?: (message: string) => void;
 }
 
@@ -34,6 +46,9 @@ export interface TTBLScrapeResult {
   metadata: TTBLMetadata;
   discoveredMatchIds: number;
   writtenRawMatches: number;
+  filteredYouthMatches: number;
+  ongoingMatches: number;
+  notFinishedMatches: number;
   outputDir: string;
   failedGamedays: Array<{ gameday: number; reason: string }>;
 }
@@ -42,6 +57,7 @@ export interface TTBLLegacyScrapeOptions {
   seasons: string[];
   numGamedays?: number;
   delayMs?: number;
+  includeYouth?: boolean;
   onLog?: (message: string) => void;
 }
 
@@ -63,6 +79,7 @@ export interface TTBLAllTimeScrapeOptions {
   endYear?: number;
   numGamedays?: number;
   delayMs?: number;
+  includeYouth?: boolean;
   onLog?: (message: string) => void;
 }
 
@@ -197,6 +214,43 @@ function matchBelongsToSeason(rawMatch: TTBLRawMatch, expectedSeason: string): b
   return actualSeason === expectedSeason;
 }
 
+function isTTBLYouthMatch(rawMatch: TTBLRawMatch): boolean {
+  const parts = [
+    rawMatch.gameday?.name ?? "",
+    rawMatch.homeTeam?.name ?? "",
+    rawMatch.awayTeam?.name ?? "",
+    rawMatch.venue?.name ?? "",
+  ]
+    .join(" ")
+    .toLowerCase();
+
+  if (!parts) {
+    return false;
+  }
+
+  return /(u[\s-]?\d{1,2}\b|youth|junior|jugend|nachwuchs|schueler|schuler)\b/.test(parts);
+}
+
+function isTTBLOngoingState(matchState: string): boolean {
+  const normalized = matchState.trim().toLowerCase().replace(/\s+/g, "");
+  if (!normalized) {
+    return false;
+  }
+
+  return /(live|running|ongoing|inprogress|active)/.test(normalized);
+}
+
+function isTTBLPreMatchState(matchState: string): boolean {
+  const normalized = matchState.trim().toLowerCase().replace(/\s+/g, "");
+  if (!normalized) {
+    return false;
+  }
+
+  return /(inactive|scheduled|upcoming|pending|notstarted|startlist|draw)/.test(
+    normalized,
+  );
+}
+
 async function fetchText(url: string): Promise<string> {
   const response = await fetch(url, {
     headers: {
@@ -302,6 +356,7 @@ export async function scrapeTTBLSeason(
 ): Promise<TTBLScrapeResult> {
   const season = options.season ?? DEFAULT_SEASON;
   const delayMs = options.delayMs ?? DEFAULT_DELAY_MS;
+  const includeYouth = options.includeYouth ?? false;
   const requestedGamedays =
     options.numGamedays && options.numGamedays > 0 ? options.numGamedays : null;
   const numGamedays =
@@ -385,6 +440,7 @@ export async function scrapeTTBLSeason(
   let processedMatchPayloads = 0;
   let rejectedOutOfSeason = 0;
   let rejectedDoublesGames = 0;
+  let filteredYouthMatches = 0;
   const acceptedMatchIds: string[] = [];
 
   for (const matchId of allMatchIds) {
@@ -401,6 +457,12 @@ export async function scrapeTTBLSeason(
             `Season ${season}: skipped out-of-season match ${matchId} (${rawMatch.gameday?.name ?? "unknown gameday"})`,
           );
         }
+        continue;
+      }
+
+      const isYouth = isTTBLYouthMatch(rawMatch);
+      if (!includeYouth && isYouth) {
+        filteredYouthMatches += 1;
         continue;
       }
 
@@ -430,6 +492,7 @@ export async function scrapeTTBLSeason(
           timestamp,
           gameIndex: game.index ?? 0,
           format: "singles",
+          isYouth,
           gameState: game.gameState ?? "Unknown",
           winnerSide: game.winnerSide ?? null,
           homePlayer: { id: homePlayerId, name: homePlayerName },
@@ -509,6 +572,7 @@ export async function scrapeTTBLSeason(
         matchState: rawMatch.matchState ?? "Unknown",
         gameday,
         timestamp,
+        isYouth,
         homeTeam: {
           id: rawMatch.homeTeam?.id ?? "",
           name: rawMatch.homeTeam?.name ?? "Unknown",
@@ -600,12 +664,28 @@ export async function scrapeTTBLSeason(
     season,
     totalMatches: writtenRawMatches,
     totalGamedays: numGamedays,
+    youthFilteredMatches: filteredYouthMatches,
+    youthIncludedMatches: matchSummaries.filter((row) => row.isYouth).length,
+    notFinishedMatches: matchSummaries.filter(
+      (row) =>
+        row.matchState !== "Finished" && !isTTBLPreMatchState(row.matchState),
+    ).length,
+    ongoingMatches: matchSummaries.filter((row) => isTTBLOngoingState(row.matchState)).length,
     uniquePlayers: uniquePlayers.length,
     playersWithStats: playerStatsFinal.length,
     totalGamesProcessed: gamesData.length,
     source: TTBL_BASE_URL,
     version: "nextjs-1.0",
   };
+
+  await persistTTBLSnapshotToDb({
+    metadata,
+    matchSummaries,
+    gamesData,
+    uniquePlayers,
+    playerStatsFinal,
+    onLog: options.onLog,
+  });
 
   await Promise.all([
     writeJson(path.join(outputDir, "metadata.json"), metadata),
@@ -628,11 +708,17 @@ export async function scrapeTTBLSeason(
   if (rejectedDoublesGames > 0) {
     emit(options.onLog, `Season ${season}: filtered out ${rejectedDoublesGames} doubles games.`);
   }
+  if (filteredYouthMatches > 0) {
+    emit(options.onLog, `Season ${season}: filtered out ${filteredYouthMatches} youth matches.`);
+  }
 
   return {
     metadata,
     discoveredMatchIds: allMatchIds.length,
     writtenRawMatches,
+    filteredYouthMatches,
+    ongoingMatches: metadata.ongoingMatches ?? 0,
+    notFinishedMatches: metadata.notFinishedMatches ?? 0,
     outputDir,
     failedGamedays,
   };
@@ -665,6 +751,31 @@ async function writeLegacyIndex(rows: TTBLLegacyIndexRow[]): Promise<void> {
 
 function parseSeasonStart(season: string): number {
   return Number.parseInt(season.split("-")[0] ?? "0", 10) || 0;
+}
+
+async function syncCurrentAliasFromSeasonDir(
+  seasonDir: string,
+  onLog?: (message: string) => void,
+): Promise<void> {
+  if (seasonDir === TTBL_OUTPUT_DIR) {
+    return;
+  }
+
+  for (const relativePath of CURRENT_ALIAS_JSON_FILES) {
+    const sourcePath = path.join(seasonDir, relativePath);
+    const payload = await readJson<unknown>(sourcePath, null);
+    if (payload === null) {
+      continue;
+    }
+
+    const targetPath = path.join(TTBL_OUTPUT_DIR, relativePath);
+    await writeJson(targetPath, payload);
+  }
+
+  emit(
+    onLog,
+    `Updated TTBL current alias from season data: ${seasonDir} -> ${TTBL_OUTPUT_DIR}.`,
+  );
 }
 
 export async function discoverTTBLSeasons(
@@ -743,6 +854,7 @@ export async function scrapeTTBLLegacySeasons(
       numGamedays: options.numGamedays,
       delayMs: options.delayMs,
       outputDir: seasonDir,
+      includeYouth: options.includeYouth,
       onLog: options.onLog,
     });
     results.push(result);
@@ -758,6 +870,13 @@ export async function scrapeTTBLLegacySeasons(
       scrapeDate: row.metadata.scrapeDate,
     })),
   );
+
+  const latestResult = [...results].sort(
+    (a, b) => parseSeasonStart(b.metadata.season) - parseSeasonStart(a.metadata.season),
+  )[0];
+  if (latestResult) {
+    await syncCurrentAliasFromSeasonDir(latestResult.outputDir, options.onLog);
+  }
 
   return {
     generatedAt: new Date().toISOString(),
@@ -782,9 +901,13 @@ export async function scrapeTTBLAllTime(
     seasons: discoveredSeasons,
     numGamedays: options.numGamedays,
     delayMs: options.delayMs,
+    includeYouth: options.includeYouth,
     onLog: options.onLog,
   });
-  const current = legacy.results[0] ?? null;
+  const current =
+    [...legacy.results].sort(
+      (a, b) => parseSeasonStart(b.metadata.season) - parseSeasonStart(a.metadata.season),
+    )[0] ?? null;
 
   emit(options.onLog, "All-time TTBL scrape complete.");
 

@@ -12,12 +12,6 @@ export interface EndpointRow {
   description: string;
 }
 
-export interface FileLocationRow {
-  label: string;
-  path: string;
-  exists: boolean;
-}
-
 export interface DashboardOverview {
   generatedAt: string;
   ttbl: {
@@ -33,7 +27,30 @@ export interface DashboardOverview {
     totalPlayers: number;
     sampleMatches: WTTMatch[];
   };
+  sync: {
+    activity: Array<{
+      id: string;
+      timestamp: string;
+      source: "wtt" | "ttbl";
+      level: "info" | "warn" | "error";
+      message: string;
+      details?: Record<string, unknown> | null;
+    }>;
+    ttblFollowup: {
+      scheduled: boolean;
+      scheduledFor: string | null;
+      lastTriggeredAt: string | null;
+      lastOutcome: "started" | "busy" | "failed" | null;
+      lastError: string | null;
+    };
+    wttFollowup: {
+      scheduled: boolean;
+      scheduledFor: string | null;
+      lastTriggeredAt: string | null;
+      lastOutcome: "started" | "busy" | "failed" | null;
+      lastError: string | null;
+    };
+  };
   players: PlayerRegistrySnapshot | null;
-  fileLocations: FileLocationRow[];
   endpoints: EndpointRow[];
 }

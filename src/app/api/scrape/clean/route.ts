@@ -44,7 +44,18 @@ export async function POST(request: Request) {
       delayMs?: number;
     };
 
-    const { alreadyRunning, status } = startCleanScrapeJob(body);
+    const options = {
+      ttblStartYear: body.ttblStartYear,
+      ttblEndYear: body.ttblEndYear,
+      ttblNumGamedays: body.ttblNumGamedays,
+      wttStartYear: body.wttStartYear,
+      wttEndYear: body.wttEndYear,
+      wttPageSize: body.wttPageSize,
+      wttMaxPages: body.wttMaxPages,
+      delayMs: body.delayMs,
+    };
+
+    const { alreadyRunning, status } = startCleanScrapeJob(options);
 
     return NextResponse.json({
       ok: true,

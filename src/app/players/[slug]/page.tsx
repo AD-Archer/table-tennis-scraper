@@ -66,6 +66,11 @@ export default async function PlayerDetailPage({ params }: PlayerDetailPageProps
   }
 
   const { player, members, allMatches, opponentSlugBySourceId } = detail;
+  const localWttMatchCount = allMatches.filter((row) => row.source === "wtt").length;
+  const hasWttProfileCareerStats = members.some(
+    (member) =>
+      member.source === "wtt" && (member.wttProfile?.stats.matches_played ?? 0) > 0,
+  );
 
   return (
     <main className="mx-auto my-8 grid w-[min(1200px,calc(100%-2rem))] gap-4">
@@ -249,11 +254,12 @@ export default async function PlayerDetailPage({ params }: PlayerDetailPageProps
                     <strong>Team/Org:</strong> {formatNullable(member.wttProfile.team)}
                   </div>
                   <div>
-                    <strong>Matches:</strong> {member.wttProfile.stats.matches_played}
+                    <strong>Profile Matches (Career):</strong>{" "}
+                    {member.wttProfile.stats.matches_played}
                   </div>
                   <div>
-                    <strong>Wins/Losses:</strong> {member.wttProfile.stats.wins}/
-                    {member.wttProfile.stats.losses}
+                    <strong>Profile Wins/Losses (Career):</strong>{" "}
+                    {member.wttProfile.stats.wins}/{member.wttProfile.stats.losses}
                   </div>
                 </div>
               ) : (
@@ -268,6 +274,12 @@ export default async function PlayerDetailPage({ params }: PlayerDetailPageProps
 
       <section className="rounded-2xl border border-slate-300 bg-white p-4 shadow-sm">
         <h2 className="m-0 text-xl font-semibold text-slate-900">All Matches</h2>
+        {localWttMatchCount === 0 && hasWttProfileCareerStats ? (
+          <p className="mt-2 mb-0 text-xs text-slate-600">
+            WTT profile stats are career totals from the WTT profile API. This table only
+            shows matches currently stored in your local database.
+          </p>
+        ) : null}
         {allMatches.length === 0 ? (
           <p className="mt-3 mb-0 text-sm text-slate-600">No matches found.</p>
         ) : (

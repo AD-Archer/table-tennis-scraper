@@ -79,6 +79,7 @@ export async function POST(request: Request) {
       years?: number[] | string;
       numGamedays?: number;
       delayMs?: number;
+      includeYouth?: boolean;
     };
 
     const seasons = normalizeSeasonTokens(
@@ -102,11 +103,13 @@ export async function POST(request: Request) {
           seasons,
           numGamedays: body.numGamedays,
           delayMs: body.delayMs,
+          includeYouth: body.includeYouth ?? false,
         })
       : startActionJob("ttbl", {
           season: seasons[0],
           numGamedays: body.numGamedays,
           delayMs: body.delayMs,
+          includeYouth: body.includeYouth ?? false,
         });
 
     return NextResponse.json({

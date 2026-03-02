@@ -1,21 +1,12 @@
-import path from "node:path";
-import { promises as fs } from "node:fs";
-import { assertDataPath, fileExists, readJson } from "@/lib/fs";
-import { TTBL_SEASONS_DIR, WTT_OUTPUT_DIR, getTTBLReadDir } from "@/lib/paths";
+import { getPrismaClient } from "@/lib/db/prisma";
 import { getPlayerSlugOverview } from "@/lib/players/slugs";
 import {
   TTBLGameRecord,
   TTBLMatchSummary,
-  TTBLMetadata,
   WTTMatch,
 } from "@/lib/types";
 
 export type MatchSource = "ttbl" | "wtt";
-
-interface TTBLSeasonEntry {
-  season: string;
-  dir: string;
-}
 
 export interface TTBLGameSetScore {
   setNumber: number;
@@ -88,16 +79,6 @@ interface ParsedTTBLMatchRef {
   gameIndex: number | null;
 }
 
-function parseSeasonStart(value: string | null | undefined): number {
-  const match = value?.match(/^(\d{4})\s*[-/]\s*(\d{4})$/);
-  if (!match?.[1]) {
-    return 0;
-  }
-
-  const parsed = Number.parseInt(match[1], 10);
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
 function parseTTBLMatchReference(value: string): ParsedTTBLMatchRef {
   const trimmed = value.trim();
   const match = trimmed.match(/^([^:]+)(?::(\d+))?$/);
@@ -162,7 +143,7 @@ function toIsoFromUnixSeconds(value: number | null | undefined): string | null {
     return null;
   }
 
-  return new Date(value * 1000).toISOString();
+  return new Date((value as number) * 1000).toISOString();
 }
 
 function toIsoFromYear(value: string | null): string | null {
@@ -172,222 +153,6 @@ function toIsoFromYear(value: string | null): string | null {
   }
 
   return new Date(Date.UTC(parsed, 0, 1)).toISOString();
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return null;
-  }
-
-  return value as Record<string, unknown>;
-}
-
-function toNullableString(value: unknown): string | null {
-  if (typeof value !== "string") {
-    return null;
-  }
-
-  const trimmed = value.trim();
-  return trimmed ? trimmed : null;
-}
-
-function toNullableNumber(value: unknown): number | null {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return value;
-  }
-
-  if (typeof value === "string") {
-    const parsed = Number.parseFloat(value);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-
-  return null;
-}
-
-function toNullableName(value: unknown): string | null {
-  const direct = toNullableString(value);
-  if (direct) {
-    return direct;
-  }
-
-  const row = asRecord(value);
-  return toNullableString(row?.name);
-}
-
-function pickPreferredScore(...values: Array<number | null | undefined>): number | null {
-  let sawZero = false;
-
-  for (const value of values) {
-    if (!Number.isFinite(value)) {
-      continue;
-    }
-
-    const numeric = Number(value);
-    if (numeric > 0) {
-      return numeric;
-    }
-
-    if (numeric === 0) {
-      sawZero = true;
-    }
-  }
-
-  return sawZero ? 0 : null;
-}
-
-function parseWinnerSide(value: unknown): "Home" | "Away" | null {
-  if (value === "Home" || value === "Away") {
-    return value;
-  }
-
-  return null;
-}
-
-function buildSetScores(game: Record<string, unknown> | null): TTBLGameSetScore[] {
-  if (!game) {
-    return [];
-  }
-
-  const rows: TTBLGameSetScore[] = [];
-  for (let setNumber = 1; setNumber <= 5; setNumber += 1) {
-    const homeScore = toNullableNumber(game[`set${setNumber}HomeScore`]);
-    const awayScore = toNullableNumber(game[`set${setNumber}AwayScore`]);
-    if (homeScore === null && awayScore === null) {
-      continue;
-    }
-
-    rows.push({
-      setNumber,
-      homeScore,
-      awayScore,
-    });
-  }
-
-  return rows;
-}
-
-function selectTTBLGame(
-  matchPayload: Record<string, unknown> | null,
-  gameIndex: number | null,
-): Record<string, unknown> | null {
-  if (!matchPayload || gameIndex === null) {
-    return null;
-  }
-
-  const games = Array.isArray(matchPayload.games) ? matchPayload.games : [];
-  for (const row of games) {
-    const game = asRecord(row);
-    if (!game) {
-      continue;
-    }
-
-    if (toNullableNumber(game.index) === gameIndex) {
-      return game;
-    }
-  }
-
-  const fallback = games[gameIndex - 1];
-  return asRecord(fallback);
-}
-
-function deriveTTBLTotalsFromGames(matchPayload: Record<string, unknown> | null): {
-  homeGames: number | null;
-  awayGames: number | null;
-  homeSets: number | null;
-  awaySets: number | null;
-} {
-  if (!matchPayload) {
-    return {
-      homeGames: null,
-      awayGames: null,
-      homeSets: null,
-      awaySets: null,
-    };
-  }
-
-  const games = Array.isArray(matchPayload.games) ? matchPayload.games : [];
-  let homeGames = 0;
-  let awayGames = 0;
-  let homeSets = 0;
-  let awaySets = 0;
-  let hasWinner = false;
-  let hasSetTotals = false;
-
-  for (const row of games) {
-    const game = asRecord(row);
-    if (!game) {
-      continue;
-    }
-
-    const gameHomeSets = toNullableNumber(game.homeSets);
-    const gameAwaySets = toNullableNumber(game.awaySets);
-    if (gameHomeSets !== null) {
-      homeSets += gameHomeSets;
-      hasSetTotals = true;
-    }
-    if (gameAwaySets !== null) {
-      awaySets += gameAwaySets;
-      hasSetTotals = true;
-    }
-
-    let winner = parseWinnerSide(game.winnerSide);
-    if (!winner && gameHomeSets !== null && gameAwaySets !== null && gameHomeSets !== gameAwaySets) {
-      winner = gameHomeSets > gameAwaySets ? "Home" : "Away";
-    }
-
-    if (winner === "Home") {
-      homeGames += 1;
-      hasWinner = true;
-    } else if (winner === "Away") {
-      awayGames += 1;
-      hasWinner = true;
-    }
-  }
-
-  return {
-    homeGames: hasWinner ? homeGames : null,
-    awayGames: hasWinner ? awayGames : null,
-    homeSets: hasSetTotals ? homeSets : null,
-    awaySets: hasSetTotals ? awaySets : null,
-  };
-}
-
-function byMostRecentSeason(entries: TTBLSeasonEntry[]): TTBLSeasonEntry[] {
-  return [...entries].sort((a, b) => parseSeasonStart(b.season) - parseSeasonStart(a.season));
-}
-
-async function listTTBLSeasonEntries(): Promise<TTBLSeasonEntry[]> {
-  const entries = new Map<string, string>();
-
-  if (await fileExists(TTBL_SEASONS_DIR)) {
-    assertDataPath(TTBL_SEASONS_DIR);
-    const rows = await fs.readdir(TTBL_SEASONS_DIR, { withFileTypes: true });
-    for (const row of rows) {
-      if (!row.isDirectory()) {
-        continue;
-      }
-
-      const seasonDir = path.join(TTBL_SEASONS_DIR, row.name);
-      const metadata = await readJson<TTBLMetadata>(
-        path.join(seasonDir, "metadata.json"),
-        null,
-      );
-      const season = metadata?.season ?? row.name;
-      if (season.trim()) {
-        entries.set(season, seasonDir);
-      }
-    }
-  }
-
-  const readDir = getTTBLReadDir();
-  const currentMeta = await readJson<TTBLMetadata>(path.join(readDir, "metadata.json"), null);
-  if (currentMeta?.season?.trim()) {
-    entries.set(currentMeta.season, readDir);
-  }
-
-  return byMostRecentSeason(
-    [...entries.entries()].map(([season, dir]) => ({ season, dir })),
-  );
 }
 
 async function getTTBLMatchDetail(requestedMatchId: string): Promise<TTBLMatchDetail> {
@@ -430,150 +195,231 @@ async function getTTBLMatchDetail(requestedMatchId: string): Promise<TTBLMatchDe
     return baseDetail;
   }
 
-  const seasonEntries = await listTTBLSeasonEntries();
-
-  for (const entry of seasonEntries) {
-    const matchPath = path.join(entry.dir, "matches", `match_${parsed.matchId}.json`);
-    if (!(await fileExists(matchPath))) {
-      continue;
-    }
-
-    const [metadata, summaryRows, matchPayload, gameRows] = await Promise.all([
-      readJson<TTBLMetadata>(path.join(entry.dir, "metadata.json"), null),
-      readJson<TTBLMatchSummary[]>(path.join(entry.dir, "matches_summary.json"), []),
-      readJson<Record<string, unknown>>(matchPath, null),
-      readJson<TTBLGameRecord[]>(path.join(entry.dir, "stats", "games_data.json"), []),
-    ]);
-
-    const summary = (summaryRows ?? []).find((row) => row.matchId === parsed.matchId) ?? null;
-    const gameStats =
-      (gameRows ?? []).find(
-        (row) =>
-          row.matchId === parsed.matchId &&
-          (parsed.gameIndex === null || row.gameIndex === parsed.gameIndex),
-      ) ?? null;
-    const selectedGame = selectTTBLGame(matchPayload, parsed.gameIndex);
-    const selectedGameRow = selectedGame ? asRecord(selectedGame) : null;
-    const selectedGameHomePlayer = asRecord(selectedGameRow?.homePlayer);
-    const selectedGameAwayPlayer = asRecord(selectedGameRow?.awayPlayer);
-    const selectedGameHomePlayerId =
-      toNullableString(selectedGameHomePlayer?.id) ?? gameStats?.homePlayer?.id ?? null;
-    const selectedGameAwayPlayerId =
-      toNullableString(selectedGameAwayPlayer?.id) ?? gameStats?.awayPlayer?.id ?? null;
-    const homeTeam = asRecord(matchPayload?.homeTeam);
-    const awayTeam = asRecord(matchPayload?.awayTeam);
-    const derivedTotals = deriveTTBLTotalsFromGames(matchPayload);
-
-    const occurredAt =
-      toIsoFromUnixSeconds(summary?.timestamp) ??
-      toIsoFromUnixSeconds(toNullableNumber(matchPayload?.timeStamp)) ??
-      toIsoFromUnixSeconds(gameStats?.timestamp);
-
-    return {
-      source: "ttbl",
-      requestedMatchId,
-      matchId: parsed.matchId,
-      gameIndex: parsed.gameIndex,
-      found: true,
-      season: metadata?.season ?? entry.season,
-      occurredAt,
-      gameday: summary?.gameday ?? toNullableName(matchPayload?.gameday) ?? gameStats?.gameday ?? null,
-      venue: summary?.venue ?? toNullableName(matchPayload?.venue),
-      matchState: toNullableString(matchPayload?.matchState) ?? summary?.matchState ?? null,
-      homeTeamName: summary?.homeTeam?.name ?? toNullableString(homeTeam?.name),
-      awayTeamName: summary?.awayTeam?.name ?? toNullableString(awayTeam?.name),
-      homeTeamGames: pickPreferredScore(
-        toNullableNumber(matchPayload?.homeGames),
-        summary?.homeTeam?.gameWins ?? null,
-        derivedTotals.homeGames,
-      ),
-      awayTeamGames: pickPreferredScore(
-        toNullableNumber(matchPayload?.awayGames),
-        summary?.awayTeam?.gameWins ?? null,
-        derivedTotals.awayGames,
-      ),
-      homeTeamSets: pickPreferredScore(
-        toNullableNumber(matchPayload?.homeSets),
-        summary?.homeTeam?.setWins ?? null,
-        derivedTotals.homeSets,
-      ),
-      awayTeamSets: pickPreferredScore(
-        toNullableNumber(matchPayload?.awaySets),
-        summary?.awayTeam?.setWins ?? null,
-        derivedTotals.awaySets,
-      ),
-      selectedGameIndex:
-        toNullableNumber(selectedGameRow?.index) ?? gameStats?.gameIndex ?? parsed.gameIndex,
-      selectedGameState:
-        toNullableString(selectedGameRow?.gameState) ?? gameStats?.gameState ?? null,
-      selectedGameWinnerSide:
-        parseWinnerSide(selectedGameRow?.winnerSide) ?? gameStats?.winnerSide ?? null,
-      selectedGameHomePlayer:
-        toNullableString(selectedGameHomePlayer?.name) ?? gameStats?.homePlayer?.name ?? null,
-      selectedGameHomePlayerSlug: selectedGameHomePlayerId
-        ? slugBySourceKey.get(`ttbl:${selectedGameHomePlayerId}`) ?? null
-        : null,
-      selectedGameAwayPlayer:
-        toNullableString(selectedGameAwayPlayer?.name) ?? gameStats?.awayPlayer?.name ?? null,
-      selectedGameAwayPlayerSlug: selectedGameAwayPlayerId
-        ? slugBySourceKey.get(`ttbl:${selectedGameAwayPlayerId}`) ?? null
-        : null,
-      selectedGameHomeSets: toNullableNumber(selectedGameRow?.homeSets),
-      selectedGameAwaySets: toNullableNumber(selectedGameRow?.awaySets),
-      selectedGameSetScores: buildSetScores(selectedGameRow),
-      summary,
-      gameStats,
-      match: matchPayload,
-      selectedGame,
-    };
+  const prisma = getPrismaClient();
+  if (!prisma) {
+    throw new Error("DATABASE_URL is required in Postgres mode.");
   }
 
-  return baseDetail;
+  const match = await prisma.ttblMatch.findUnique({
+    where: { id: parsed.matchId },
+    include: {
+      games: {
+        orderBy: { gameIndex: "asc" },
+      },
+    },
+  });
+
+  if (!match) {
+    return baseDetail;
+  }
+
+  const selectedGame =
+    parsed.gameIndex !== null
+      ? match.games.find((row) => row.gameIndex === parsed.gameIndex) ?? null
+      : match.games[0] ?? null;
+
+  const summary: TTBLMatchSummary = {
+    matchId: match.id,
+    matchState: match.matchState,
+    gameday: match.gameday,
+    timestamp: Number(match.timestampMs),
+    isYouth: match.isYouth,
+    homeTeam: {
+      id: match.homeTeamId ?? "",
+      name: match.homeTeamName ?? "Unknown",
+      rank: match.homeTeamRank ?? 0,
+      gameWins: match.homeGameWins ?? 0,
+      setWins: match.homeSetWins ?? 0,
+    },
+    awayTeam: {
+      id: match.awayTeamId ?? "",
+      name: match.awayTeamName ?? "Unknown",
+      rank: match.awayTeamRank ?? 0,
+      gameWins: match.awayGameWins ?? 0,
+      setWins: match.awaySetWins ?? 0,
+    },
+    gamesCount: match.gamesCount,
+    venue: match.venue ?? "Unknown",
+  };
+
+  const gameStats: TTBLGameRecord | null = selectedGame
+    ? {
+        matchId: match.id,
+        gameday: match.gameday,
+        timestamp: Number(selectedGame.timestampMs),
+        gameIndex: selectedGame.gameIndex,
+        format: selectedGame.format === "doubles" ? "doubles" : "singles",
+        isYouth: selectedGame.isYouth,
+        gameState: selectedGame.gameState,
+        winnerSide: selectedGame.winnerSide === "Home" || selectedGame.winnerSide === "Away" ? selectedGame.winnerSide : null,
+        homePlayer: {
+          id: selectedGame.homePlayerId,
+          name: selectedGame.homePlayerName ?? "Unknown",
+        },
+        awayPlayer: {
+          id: selectedGame.awayPlayerId,
+          name: selectedGame.awayPlayerName ?? "Unknown",
+        },
+      }
+    : null;
+
+  return {
+    source: "ttbl",
+    requestedMatchId,
+    matchId: parsed.matchId,
+    gameIndex: parsed.gameIndex,
+    found: true,
+    season: match.season,
+    occurredAt: toIsoFromUnixSeconds(Number(match.timestampMs)),
+    gameday: match.gameday,
+    venue: match.venue,
+    matchState: match.matchState,
+    homeTeamName: match.homeTeamName,
+    awayTeamName: match.awayTeamName,
+    homeTeamGames: match.homeGameWins,
+    awayTeamGames: match.awayGameWins,
+    homeTeamSets: match.homeSetWins,
+    awayTeamSets: match.awaySetWins,
+    selectedGameIndex: selectedGame?.gameIndex ?? parsed.gameIndex,
+    selectedGameState: selectedGame?.gameState ?? null,
+    selectedGameWinnerSide:
+      selectedGame?.winnerSide === "Home" || selectedGame?.winnerSide === "Away"
+        ? selectedGame.winnerSide
+        : null,
+    selectedGameHomePlayer: selectedGame?.homePlayerName ?? null,
+    selectedGameHomePlayerSlug: selectedGame?.homePlayerId
+      ? slugBySourceKey.get(`ttbl:${selectedGame.homePlayerId}`) ?? null
+      : null,
+    selectedGameAwayPlayer: selectedGame?.awayPlayerName ?? null,
+    selectedGameAwayPlayerSlug: selectedGame?.awayPlayerId
+      ? slugBySourceKey.get(`ttbl:${selectedGame.awayPlayerId}`) ?? null
+      : null,
+    selectedGameHomeSets: null,
+    selectedGameAwaySets: null,
+    selectedGameSetScores: [],
+    summary,
+    gameStats,
+    match: {
+      id: match.id,
+      matchState: match.matchState,
+      season: match.season,
+      gameday: match.gameday,
+      venue: match.venue,
+      timestamp: Number(match.timestampMs),
+      homeTeam: match.homeTeamName,
+      awayTeam: match.awayTeamName,
+    },
+    selectedGame: selectedGame
+      ? {
+          index: selectedGame.gameIndex,
+          gameState: selectedGame.gameState,
+          winnerSide: selectedGame.winnerSide,
+          homePlayer: selectedGame.homePlayerName,
+          awayPlayer: selectedGame.awayPlayerName,
+        }
+      : null,
+  };
 }
 
 async function getWTTMatchDetail(requestedMatchId: string): Promise<WTTMatchDetail> {
   const matchId = requestedMatchId.trim();
   const slugBySourceKey = await buildSlugBySourceKey();
-  const matches =
-    (await readJson<WTTMatch[]>(path.join(WTT_OUTPUT_DIR, "matches.json"), [])) ?? [];
-  const match = matches.find((row) => row.match_id === matchId) ?? null;
+  const prisma = getPrismaClient();
+  if (!prisma) {
+    throw new Error("DATABASE_URL is required in Postgres mode.");
+  }
+
+  const row = await prisma.wttMatch.findUnique({
+    where: { id: matchId },
+    include: {
+      games: {
+        orderBy: { gameNumber: "asc" },
+      },
+    },
+  });
+
+  const year = row?.year ? String(row.year) : null;
+  const match: WTTMatch | null = row
+    ? {
+        match_id: row.id,
+        source_match_id: row.sourceMatchId,
+        event_id: row.eventId,
+        sub_event_code: row.subEventCode,
+        year,
+        last_updated_at: row.lastUpdatedAt?.toISOString() ?? null,
+        tournament: row.tournament,
+        event: row.event,
+        stage: row.stage,
+        round: row.round,
+        result_status: row.resultStatus,
+        not_finished: row.notFinished,
+        ongoing: row.ongoing,
+        is_youth: row.isYouth,
+        walkover: row.walkover,
+        winner_raw: row.winnerRaw,
+        winner_inferred: row.winnerInferred === "A" || row.winnerInferred === "X" ? row.winnerInferred : null,
+        final_sets: {
+          a: row.finalSetsA,
+          x: row.finalSetsX,
+        },
+        games: row.games.map((game) => ({
+          game_number: game.gameNumber,
+          a_points: game.aPoints,
+          x_points: game.xPoints,
+        })),
+        players: {
+          a: {
+            ittf_id: row.playerAId,
+            name: row.playerAName,
+            association: row.playerAAssoc,
+          },
+          x: {
+            ittf_id: row.playerXId,
+            name: row.playerXName,
+            association: row.playerXAssoc,
+          },
+        },
+        source: {
+          type: row.sourceType ?? "db",
+          base_url: row.sourceBaseUrl ?? "",
+          list_id: row.sourceListId ?? "",
+        },
+      }
+    : null;
 
   return {
     source: "wtt",
     requestedMatchId,
     matchId,
     found: Boolean(match),
-    year: match?.year ?? null,
-    occurredAt: toIsoFromYear(match?.year ?? null),
-    tournament: match?.tournament ?? null,
-    event: match?.event ?? null,
-    stage: match?.stage ?? null,
-    round: match?.round ?? null,
-    walkover: typeof match?.walkover === "boolean" ? match.walkover : null,
-    winnerInferred: match?.winner_inferred ?? null,
-    playerAName: match?.players.a.name ?? match?.players.a.ittf_id ?? null,
-    playerASlug: match?.players.a.ittf_id
-      ? slugBySourceKey.get(`wtt:${match.players.a.ittf_id}`) ?? null
-      : null,
-    playerAAssociation: match?.players.a.association ?? null,
-    playerXName: match?.players.x.name ?? match?.players.x.ittf_id ?? null,
-    playerXSlug: match?.players.x.ittf_id
-      ? slugBySourceKey.get(`wtt:${match.players.x.ittf_id}`) ?? null
-      : null,
-    playerXAssociation: match?.players.x.association ?? null,
-    finalSetsA:
-      typeof match?.final_sets.a === "number" && Number.isFinite(match.final_sets.a)
-        ? match.final_sets.a
+    year,
+    occurredAt: row?.lastUpdatedAt?.toISOString() ?? toIsoFromYear(year),
+    tournament: row?.tournament ?? null,
+    event: row?.event ?? null,
+    stage: row?.stage ?? null,
+    round: row?.round ?? null,
+    walkover: typeof row?.walkover === "boolean" ? row.walkover : null,
+    winnerInferred:
+      row?.winnerInferred === "A" || row?.winnerInferred === "X"
+        ? row.winnerInferred
         : null,
-    finalSetsX:
-      typeof match?.final_sets.x === "number" && Number.isFinite(match.final_sets.x)
-        ? match.final_sets.x
-        : null,
+    playerAName: row?.playerAName ?? row?.playerAId ?? null,
+    playerASlug: row?.playerAId
+      ? slugBySourceKey.get(`wtt:${row.playerAId}`) ?? null
+      : null,
+    playerAAssociation: row?.playerAAssoc ?? null,
+    playerXName: row?.playerXName ?? row?.playerXId ?? null,
+    playerXSlug: row?.playerXId
+      ? slugBySourceKey.get(`wtt:${row.playerXId}`) ?? null
+      : null,
+    playerXAssociation: row?.playerXAssoc ?? null,
+    finalSetsA: row?.finalSetsA ?? null,
+    finalSetsX: row?.finalSetsX ?? null,
     games:
-      match?.games.map((row) => ({
-        gameNumber: row.game_number,
-        aPoints: row.a_points,
-        xPoints: row.x_points,
+      row?.games.map((game) => ({
+        gameNumber: game.gameNumber,
+        aPoints: game.aPoints,
+        xPoints: game.xPoints,
       })) ?? [],
     match,
   };

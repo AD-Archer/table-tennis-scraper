@@ -5,10 +5,8 @@ import {
   startActionJob,
 } from "@/lib/jobs/action-job";
 import {
-  getManualMergeFilePath,
   getPlayerRegistrySnapshot,
 } from "@/lib/players/registry";
-import { toProjectRelative } from "@/lib/paths";
 
 export async function GET(request: Request) {
   try {
@@ -31,15 +29,11 @@ export async function GET(request: Request) {
       });
     }
 
-    const [registry, manualPath] = await Promise.all([
-      getPlayerRegistrySnapshot(),
-      getManualMergeFilePath(),
-    ]);
+    const registry = await getPlayerRegistrySnapshot();
 
     return NextResponse.json({
       ok: true,
       registry,
-      manualMergeFile: toProjectRelative(manualPath),
     });
   } catch (error) {
     return NextResponse.json(

@@ -9,14 +9,30 @@ Next.js port of the Python scraping workflow for:
 ## Run
 
 ```bash
-cd web
-npm install
-npm run dev
+pnpm install
+pnpm prisma:generate
+pnpm dev
 ```
 
 Open `http://localhost:3000`.
 
-All scraper reads/writes are hard-locked to `web/data` (the app does not read from `../TTBL` or `../ITTF`, and path env overrides are ignored).
+All scraper reads/writes are hard-locked to `data/` (the app does not read from `../TTBL` or `../ITTF`, and path env overrides are ignored).
+
+## Environment
+
+Set these in `.env`:
+
+- `DATABASE_URL=postgresql://...` (required for Prisma/Postgres mode)
+- `NEXT_PUBLIC_MASTER_SYNC_PASSWORD=...` (frontend-only check for master sync and destroy-data buttons)
+- `DATA_STORE_MODE=postgres` (`files`, `hybrid`, or `postgres`; default is `postgres`)
+
+You can start from `.env.example`.
+
+Notes:
+
+- `hybrid`: keeps file output and mirrors artifacts into Postgres.
+- `postgres`: reads/writes artifacts from Postgres only (no local `data/` files are created).
+- Apply included migration with `pnpm prisma:migrate:deploy` after configuring `DATABASE_URL`.
 
 ## What The UI Gives You
 
@@ -52,20 +68,19 @@ All scraper reads/writes are hard-locked to `web/data` (the app does not read fr
 - `GET /api/overview`
 - `GET /api/endpoints`
 
-## Data Output Paths
+## Data Artifact Keys
 
-- TTBL active read dir: latest season under `data/ttbl/seasons/*` (or `data/ttbl/current` if newer)
-- TTBL current season alias output: `data/ttbl/current`
-- TTBL legacy seasons: `data/ttbl/seasons`
-- TTBL legacy index: `data/ttbl/legacy_index.json`
-- WTT dataset: `data/wtt`
-- Player registry files: `data/players`
-- Manual alias merges: `data/players/manual_merges.json`
+- TTBL current metadata: `ttbl/current/metadata.json`
+- TTBL season prefix: `ttbl/seasons/*`
+- TTBL legacy index: `ttbl/legacy_index.json`
+- WTT dataset: `wtt/dataset.json`
+- Player registry: `players/player_registry.json`
+- Manual alias merges: `players/manual_merges`
 
 ## Clean Scrape
 
 Use `POST /api/scrape/clean` to:
-1. Delete `web/data`
+1. Delete all existing artifacts
 2. Discover and scrape TTBL all-time seasons
 3. Discover and scrape ITTF/WTT all-time years
 4. Rebuild merged player registry

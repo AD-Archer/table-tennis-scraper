@@ -1,5 +1,5 @@
-import { readJson, writeJson } from "@/lib/fs";
-import { TTBL_PLAYER_PROFILES_FILE } from "@/lib/paths";
+import type { TtblPlayerProfile as TtblPlayerProfileRow } from "@prisma/client";
+import { getPrismaClient } from "@/lib/db/prisma";
 import { TTBLPlayerProfile } from "@/lib/types";
 
 const TTBL_BASE_URL = "https://www.ttbl.de";
@@ -41,6 +41,15 @@ function emit(log: ((message: string) => void) | undefined, message: string): vo
   log(`[${timestamp}] [TTBL_PROFILE] ${message}`);
 }
 
+function getRequiredPrisma() {
+  const prisma = getPrismaClient();
+  if (!prisma) {
+    throw new Error("DATABASE_URL is required for TTBL player profile storage.");
+  }
+
+  return prisma;
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return null;
@@ -69,6 +78,14 @@ function toNullableNumber(value: unknown): number | null {
   }
 
   return null;
+}
+
+function toNullableInt(value: number | null | undefined): number | null {
+  if (!Number.isFinite(value)) {
+    return null;
+  }
+
+  return Math.trunc(value as number);
 }
 
 function buildSeasonLabel(season: Record<string, unknown> | null): string | null {
@@ -165,6 +182,144 @@ function extractProfileFromPayload(sourcePlayerId: string, payload: NextDataPayl
   };
 }
 
+function toProfileFromRow(row: TtblPlayerProfileRow): TTBLPlayerProfile {
+  return {
+    sourcePlayerId: row.sourcePlayerId,
+    stablePlayerId: row.stablePlayerId,
+    seasonPlayerId: row.seasonPlayerId,
+    fetchedAt: row.fetchedAt.toISOString(),
+    fullName: row.fullName,
+    firstName: row.firstName,
+    lastName: row.lastName,
+    nationality: row.nationality,
+    nationalitySecondary: row.nationalitySecondary,
+    birthdayUnix: row.birthdayUnix,
+    heightCm: row.heightCm,
+    weightKg: row.weightKg,
+    hand: row.hand,
+    racketPosture: row.racketPosture,
+    role: row.role,
+    currentClub: row.currentClub,
+    outfitter: row.outfitter,
+    outfitterWebsite: row.outfitterWebsite,
+    seasonLabel: row.seasonLabel,
+    imageUrl: row.imageUrl,
+    actionImageUrl: row.actionImageUrl,
+    cardImageUrl: row.cardImageUrl,
+    social: {
+      instagram: row.socialInstagram,
+      youtube: row.socialYoutube,
+      website: row.socialWebsite,
+      tiktok: row.socialTiktok,
+      facebook: row.socialFacebook,
+    },
+    metrics: {
+      ttblRank: row.metricsTtblRank,
+      worldRank: row.metricsWorldRank,
+      qttrValue: row.metricsQttrValue,
+      gameWins: row.metricsGameWins,
+      gameLosses: row.metricsGameLosses,
+      setWins: row.metricsSetWins,
+      setLosses: row.metricsSetLosses,
+      ballWins: row.metricsBallWins,
+      ballLosses: row.metricsBallLosses,
+    },
+    sampleSize: {
+      games: row.sampleGames,
+      homeGames: row.sampleHomeGames,
+      awayGames: row.sampleAwayGames,
+    },
+  };
+}
+
+async function upsertProfile(profile: TTBLPlayerProfile): Promise<void> {
+  const prisma = getRequiredPrisma();
+  await prisma.ttblPlayerProfile.upsert({
+    where: { sourcePlayerId: profile.sourcePlayerId },
+    create: {
+      sourcePlayerId: profile.sourcePlayerId,
+      stablePlayerId: profile.stablePlayerId,
+      seasonPlayerId: profile.seasonPlayerId,
+      fetchedAt: new Date(profile.fetchedAt),
+      fullName: profile.fullName,
+      firstName: profile.firstName,
+      lastName: profile.lastName,
+      nationality: profile.nationality,
+      nationalitySecondary: profile.nationalitySecondary,
+      birthdayUnix: toNullableInt(profile.birthdayUnix),
+      heightCm: profile.heightCm,
+      weightKg: profile.weightKg,
+      hand: profile.hand,
+      racketPosture: profile.racketPosture,
+      role: profile.role,
+      currentClub: profile.currentClub,
+      outfitter: profile.outfitter,
+      outfitterWebsite: profile.outfitterWebsite,
+      seasonLabel: profile.seasonLabel,
+      imageUrl: profile.imageUrl,
+      actionImageUrl: profile.actionImageUrl,
+      cardImageUrl: profile.cardImageUrl,
+      socialInstagram: profile.social.instagram,
+      socialYoutube: profile.social.youtube,
+      socialWebsite: profile.social.website,
+      socialTiktok: profile.social.tiktok,
+      socialFacebook: profile.social.facebook,
+      metricsTtblRank: toNullableInt(profile.metrics.ttblRank),
+      metricsWorldRank: toNullableInt(profile.metrics.worldRank),
+      metricsQttrValue: toNullableInt(profile.metrics.qttrValue),
+      metricsGameWins: toNullableInt(profile.metrics.gameWins),
+      metricsGameLosses: toNullableInt(profile.metrics.gameLosses),
+      metricsSetWins: toNullableInt(profile.metrics.setWins),
+      metricsSetLosses: toNullableInt(profile.metrics.setLosses),
+      metricsBallWins: toNullableInt(profile.metrics.ballWins),
+      metricsBallLosses: toNullableInt(profile.metrics.ballLosses),
+      sampleGames: profile.sampleSize.games,
+      sampleHomeGames: profile.sampleSize.homeGames,
+      sampleAwayGames: profile.sampleSize.awayGames,
+    },
+    update: {
+      stablePlayerId: profile.stablePlayerId,
+      seasonPlayerId: profile.seasonPlayerId,
+      fetchedAt: new Date(profile.fetchedAt),
+      fullName: profile.fullName,
+      firstName: profile.firstName,
+      lastName: profile.lastName,
+      nationality: profile.nationality,
+      nationalitySecondary: profile.nationalitySecondary,
+      birthdayUnix: toNullableInt(profile.birthdayUnix),
+      heightCm: profile.heightCm,
+      weightKg: profile.weightKg,
+      hand: profile.hand,
+      racketPosture: profile.racketPosture,
+      role: profile.role,
+      currentClub: profile.currentClub,
+      outfitter: profile.outfitter,
+      outfitterWebsite: profile.outfitterWebsite,
+      seasonLabel: profile.seasonLabel,
+      imageUrl: profile.imageUrl,
+      actionImageUrl: profile.actionImageUrl,
+      cardImageUrl: profile.cardImageUrl,
+      socialInstagram: profile.social.instagram,
+      socialYoutube: profile.social.youtube,
+      socialWebsite: profile.social.website,
+      socialTiktok: profile.social.tiktok,
+      socialFacebook: profile.social.facebook,
+      metricsTtblRank: toNullableInt(profile.metrics.ttblRank),
+      metricsWorldRank: toNullableInt(profile.metrics.worldRank),
+      metricsQttrValue: toNullableInt(profile.metrics.qttrValue),
+      metricsGameWins: toNullableInt(profile.metrics.gameWins),
+      metricsGameLosses: toNullableInt(profile.metrics.gameLosses),
+      metricsSetWins: toNullableInt(profile.metrics.setWins),
+      metricsSetLosses: toNullableInt(profile.metrics.setLosses),
+      metricsBallWins: toNullableInt(profile.metrics.ballWins),
+      metricsBallLosses: toNullableInt(profile.metrics.ballLosses),
+      sampleGames: profile.sampleSize.games,
+      sampleHomeGames: profile.sampleSize.homeGames,
+      sampleAwayGames: profile.sampleSize.awayGames,
+    },
+  });
+}
+
 async function fetchTTBLPlayerProfile(
   sourcePlayerId: string,
   options: ProfileFetchOptions = {},
@@ -186,11 +341,13 @@ async function fetchTTBLPlayerProfile(
 }
 
 export async function readTTBLPlayerProfiles(): Promise<TTBLProfilesMap> {
-  return (await readJson<TTBLProfilesMap>(TTBL_PLAYER_PROFILES_FILE, {})) ?? {};
-}
-
-async function writeTTBLPlayerProfiles(profiles: TTBLProfilesMap): Promise<void> {
-  await writeJson(TTBL_PLAYER_PROFILES_FILE, profiles);
+  const prisma = getRequiredPrisma();
+  const rows = await prisma.ttblPlayerProfile.findMany({});
+  const out: TTBLProfilesMap = {};
+  for (const row of rows) {
+    out[row.sourcePlayerId] = toProfileFromRow(row);
+  }
+  return out;
 }
 
 export async function getTTBLPlayerProfile(
@@ -202,14 +359,18 @@ export async function getTTBLPlayerProfile(
     return null;
   }
 
-  const profiles = await readTTBLPlayerProfiles();
-  if (!options.refresh && profiles[normalizedId]) {
-    return profiles[normalizedId] ?? null;
+  const prisma = getRequiredPrisma();
+  if (!options.refresh) {
+    const existing = await prisma.ttblPlayerProfile.findUnique({
+      where: { sourcePlayerId: normalizedId },
+    });
+    if (existing) {
+      return toProfileFromRow(existing);
+    }
   }
 
   const profile = await fetchTTBLPlayerProfile(normalizedId, options);
-  profiles[normalizedId] = profile;
-  await writeTTBLPlayerProfiles(profiles);
+  await upsertProfile(profile);
   return profile;
 }
 
@@ -231,20 +392,25 @@ export async function hydrateTTBLPlayerProfiles(
     };
   }
 
-  const profiles = await readTTBLPlayerProfiles();
+  const prisma = getRequiredPrisma();
+  const existingRows = await prisma.ttblPlayerProfile.findMany({
+    where: { sourcePlayerId: { in: ids } },
+    select: { sourcePlayerId: true },
+  });
+  const existing = new Set(existingRows.map((row) => row.sourcePlayerId));
 
   let fetched = 0;
   let cached = 0;
   let failed = 0;
   for (const id of ids) {
-    if (profiles[id]) {
+    if (existing.has(id)) {
       cached += 1;
       continue;
     }
 
     try {
       const profile = await fetchTTBLPlayerProfile(id, { onLog: options.onLog });
-      profiles[id] = profile;
+      await upsertProfile(profile);
       fetched += 1;
     } catch (error) {
       failed += 1;
@@ -259,7 +425,6 @@ export async function hydrateTTBLPlayerProfiles(
     }
   }
 
-  await writeTTBLPlayerProfiles(profiles);
   return {
     requested: ids.length,
     fetched,

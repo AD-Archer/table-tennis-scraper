@@ -88,6 +88,35 @@ function findCompetitor(
   return competitors.find((c) => c.competitorType === type) ?? null;
 }
 
+function normalizeStatus(value: string | null | undefined): string | null {
+  if (!value) {
+    return null;
+  }
+
+  const normalized = value.trim().toUpperCase();
+  return normalized || null;
+}
+
+function deriveProgressFlags(status: string | null): {
+  ongoing: boolean;
+  notFinished: boolean;
+} {
+  const normalized = normalizeStatus(status);
+  if (!normalized) {
+    return { ongoing: false, notFinished: false };
+  }
+
+  if (/(OFFICIAL|FINISHED|FINAL|COMPLETE|COMPLETED|CLOSED)/.test(normalized)) {
+    return { ongoing: false, notFinished: false };
+  }
+
+  if (/(LIVE|RUNNING|ONGOING|INPROGRESS|IN_PROGRESS|INTERMEDIATE|ACTIVE)/.test(normalized)) {
+    return { ongoing: true, notFinished: true };
+  }
+
+  return { ongoing: false, notFinished: true };
+}
+
 function competitorToPlayer(
   c: WTTCMSMatchCardCompetitor | null,
 ): WTTMatch["players"]["a"] {
@@ -106,6 +135,8 @@ export function matchCardToWTTMatch(card: WTTCMSMatchCard): WTTMatch {
   const finalSets = parseOverallScores(card.overallScores);
   const games = parseGameScores(card.gameScores);
   const { stage, round } = parseStageAndRound(card.subEventDescription);
+  const resultStatus = normalizeStatus(card.resultStatus);
+  const progress = deriveProgressFlags(resultStatus);
 
   const home = findCompetitor(card.competitiors, "H");
   const away = findCompetitor(card.competitiors, "A");
@@ -121,11 +152,18 @@ export function matchCardToWTTMatch(card: WTTCMSMatchCard): WTTMatch {
 
   return {
     match_id: card.documentCode,
+    source_match_id: card.documentCode,
+    event_id: card.eventId,
     year: parseYearFromDate(card.matchDateTime?.startDateUTC),
+    last_updated_at: card.matchDateTime?.startDateUTC ?? null,
     tournament: null,
     event: card.subEventName || null,
     stage,
     round,
+    result_status: resultStatus,
+    not_finished: progress.notFinished,
+    ongoing: progress.ongoing,
+    is_youth: /U\d+/i.test(card.subEventDescription ?? card.subEventName ?? ""),
     walkover: hasWalkover,
     winner_raw: null,
     winner_inferred: winnerInferred,

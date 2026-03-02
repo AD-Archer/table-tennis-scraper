@@ -1,11 +1,8 @@
-import path from "node:path";
-import { promises as fs } from "node:fs";
-import { readJson } from "@/lib/fs";
 import {
   resolveCanonicalCountry,
   resolveCanonicalGender,
 } from "@/lib/normalization/field-mapping";
-import { TTBL_SEASONS_DIR, WTT_OUTPUT_DIR, getTTBLReadDir } from "@/lib/paths";
+import { getPrismaClient } from "@/lib/db/prisma";
 import { ensurePlayerRegistry } from "@/lib/players/registry";
 import { readTTBLPlayerProfiles } from "@/lib/ttbl/player-profiles";
 import { inferWTTEventGender, isWTTGenderedSinglesEvent } from "@/lib/wtt/events";
@@ -17,10 +14,6 @@ import {
   PlayerSlugMatchEntry,
   PlayerSlugOverview,
   PlayerSlugRow,
-  TTBLGameRecord,
-  TTBLMetadata,
-  WTTMatch,
-  WTTPlayer,
 } from "@/lib/types";
 
 interface TTBLAggregate {
@@ -32,21 +25,6 @@ interface TTBLAggregate {
   leagueNames: Set<string>;
   recentMatches: PlayerSlugMatchEntry[];
 }
-
-interface TTBLGameScoreRow {
-  homeSets: number | null;
-  awaySets: number | null;
-}
-
-type TTBLMatchGameScoreMap = Map<number, TTBLGameScoreRow>;
-
-interface TTBLMatchContextRow {
-  gameScores: TTBLMatchGameScoreMap;
-  leagueId: string | null;
-  leagueName: string | null;
-}
-
-type TTBLMatchContextMap = Map<string, TTBLMatchContextRow>;
 
 interface WTTAggregate {
   matchesPlayed: number;
@@ -60,18 +38,6 @@ interface WTTAggregate {
 
 function parseSeasonStart(season: string): number {
   return Number.parseInt(season.split("-")[0] ?? "0", 10) || 0;
-}
-
-async function listSeasonDirectories(): Promise<string[]> {
-  try {
-    const rows = await fs.readdir(TTBL_SEASONS_DIR, { withFileTypes: true });
-    return rows
-      .filter((row) => row.isDirectory())
-      .map((row) => row.name)
-      .sort((a, b) => parseSeasonStart(b) - parseSeasonStart(a));
-  } catch {
-    return [];
-  }
 }
 
 function toIsoFromUnixSeconds(value: number): string | null {
@@ -98,136 +64,6 @@ function toSortableTimestamp(iso: string | null): number {
 
   const parsed = Date.parse(iso);
   return Number.isFinite(parsed) ? parsed : 0;
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return null;
-  }
-
-  return value as Record<string, unknown>;
-}
-
-function toNullableNumber(value: unknown): number | null {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return value;
-  }
-
-  if (typeof value === "string") {
-    const parsed = Number.parseFloat(value);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-
-  return null;
-}
-
-function toNullableString(value: unknown): string | null {
-  if (typeof value !== "string") {
-    return null;
-  }
-
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
-}
-
-function toScoreString(left: number | null, right: number | null): string | null {
-  if (!Number.isFinite(left) || !Number.isFinite(right)) {
-    return null;
-  }
-
-  return `${left}-${right}`;
-}
-
-function inferWinnerSideFromSets(
-  homeSets: number | null,
-  awaySets: number | null,
-): "Home" | "Away" | null {
-  if (!Number.isFinite(homeSets) || !Number.isFinite(awaySets)) {
-    return null;
-  }
-
-  const home = Number(homeSets);
-  const away = Number(awaySets);
-  if (home === away) {
-    return null;
-  }
-
-  return home > away ? "Home" : "Away";
-}
-
-async function loadTTBLMatchContext(
-  seasonDir: string,
-  matchId: string,
-  cache: TTBLMatchContextMap,
-): Promise<TTBLMatchContextRow> {
-  const cached = cache.get(matchId);
-  if (cached) {
-    return cached;
-  }
-
-  const payload =
-    (await readJson<Record<string, unknown>>(
-      path.join(seasonDir, "matches", `match_${matchId}.json`),
-      null,
-    )) ?? null;
-  const games = Array.isArray(payload?.games) ? payload.games : [];
-  const gameScores: TTBLMatchGameScoreMap = new Map();
-
-  for (const rawGame of games) {
-    const game = asRecord(rawGame);
-    if (!game) {
-      continue;
-    }
-
-    const gameIndex = toNullableNumber(game.index);
-    if (gameIndex === null || !Number.isFinite(gameIndex)) {
-      continue;
-    }
-
-    gameScores.set(Math.trunc(gameIndex), {
-      homeSets: toNullableNumber(game.homeSets),
-      awaySets: toNullableNumber(game.awaySets),
-    });
-  }
-
-  const homeTeam = asRecord(payload?.homeTeam);
-  const awayTeam = asRecord(payload?.awayTeam);
-  const gameday = asRecord(payload?.gameday);
-  const season = asRecord(payload?.season);
-  const seasonBundesliga = asRecord(season?.bundesliga);
-
-  const row: TTBLMatchContextRow = {
-    gameScores,
-    leagueId:
-      toNullableString(homeTeam?.leagueId) ??
-      toNullableString(awayTeam?.leagueId) ??
-      toNullableString(gameday?.leagueId) ??
-      toNullableString(seasonBundesliga?.id),
-    leagueName:
-      toNullableString(homeTeam?.league) ??
-      toNullableString(awayTeam?.league) ??
-      toNullableString(gameday?.league) ??
-      toNullableString(seasonBundesliga?.name),
-  };
-
-  cache.set(matchId, row);
-  return row;
-}
-
-function inferGenderFromCounts(counts: Record<PlayerGender, number>): PlayerGender {
-  if (counts.mixed > 0 || (counts.M > 0 && counts.W > 0)) {
-    return "mixed";
-  }
-
-  if (counts.M > 0) {
-    return "M";
-  }
-
-  if (counts.W > 0) {
-    return "W";
-  }
-
-  return "unknown";
 }
 
 function pushUniqueRecentMatches(
@@ -307,161 +143,150 @@ function buildCandidateMap(
 }
 
 async function collectTTBLAggregates(): Promise<Map<string, TTBLAggregate>> {
+  const prisma = getPrismaClient();
+  if (!prisma) {
+    return new Map();
+  }
+
+  const games = await prisma.ttblGame.findMany({
+    where: {
+      isYouth: false,
+      gameState: "Finished",
+      homePlayerId: { not: null },
+      awayPlayerId: { not: null },
+    },
+    select: {
+      matchId: true,
+      gameIndex: true,
+      season: true,
+      gameday: true,
+      timestampMs: true,
+      winnerSide: true,
+      format: true,
+      homePlayerId: true,
+      homePlayerName: true,
+      awayPlayerId: true,
+      awayPlayerName: true,
+    },
+  });
+
   const map = new Map<string, TTBLAggregate>();
-  const seasonDirs = new Map<string, string>();
 
-  const seasons = await listSeasonDirectories();
-  for (const season of seasons) {
-    seasonDirs.set(path.join(TTBL_SEASONS_DIR, season), season);
-  }
-
-  const currentDir = getTTBLReadDir();
-  const currentMeta = await readJson<TTBLMetadata>(
-    path.join(currentDir, "metadata.json"),
-    null,
-  );
-  if (currentMeta?.season) {
-    seasonDirs.set(currentDir, currentMeta.season);
-  }
-
-  for (const [seasonDir, season] of seasonDirs.entries()) {
-    const games =
-      (await readJson<TTBLGameRecord[]>(
-        path.join(seasonDir, "stats", "games_data.json"),
-        [],
-      )) ?? [];
-    const matchContextById = new Map<string, TTBLMatchContextRow>();
-    for (const game of games) {
-      if (
-        game.format === "doubles" ||
-        game.gameState !== "Finished" ||
-        !game.homePlayer.id ||
-        !game.awayPlayer.id
-      ) {
-        continue;
-      }
-
-      const occurredAt = toIsoFromUnixSeconds(game.timestamp ?? 0);
-      const matchContext = await loadTTBLMatchContext(
-        seasonDir,
-        game.matchId,
-        matchContextById,
-      );
-      const matchGameScore = matchContext.gameScores.get(game.gameIndex);
-      const resolvedWinnerSide =
-        game.winnerSide ??
-        inferWinnerSideFromSets(
-          matchGameScore?.homeSets ?? null,
-          matchGameScore?.awaySets ?? null,
-        );
-      const homeScore = toScoreString(matchGameScore?.homeSets ?? null, matchGameScore?.awaySets ?? null);
-      const awayScore = toScoreString(matchGameScore?.awaySets ?? null, matchGameScore?.homeSets ?? null);
-
-      const home = map.get(game.homePlayer.id) ?? {
-        matchesPlayed: 0,
-        wins: 0,
-        losses: 0,
-        seasons: new Set<string>(),
-        leagueIds: new Set<string>(),
-        leagueNames: new Set<string>(),
-        recentMatches: [],
-      };
-      home.matchesPlayed += 1;
-      if (resolvedWinnerSide === "Home") {
-        home.wins += 1;
-      } else if (resolvedWinnerSide === "Away") {
-        home.losses += 1;
-      }
-      home.seasons.add(season);
-      if (matchContext.leagueId) {
-        home.leagueIds.add(matchContext.leagueId);
-      }
-      if (matchContext.leagueName) {
-        home.leagueNames.add(matchContext.leagueName);
-      }
-      home.recentMatches = pushUniqueRecentMatches(home.recentMatches, [
-        {
-          source: "ttbl",
-          matchId: `${game.matchId}:${game.gameIndex}`,
-          occurredAt,
-          seasonOrYear: season,
-          event: game.gameday ?? null,
-          opponent: game.awayPlayer.name ?? null,
-          opponentSourceId: game.awayPlayer.id ?? null,
-          score: homeScore,
-          outcome:
-            resolvedWinnerSide === "Home"
-              ? "W"
-              : resolvedWinnerSide === "Away"
-                ? "L"
-                : null,
-        },
-      ]);
-      map.set(game.homePlayer.id, home);
-
-      const away = map.get(game.awayPlayer.id) ?? {
-        matchesPlayed: 0,
-        wins: 0,
-        losses: 0,
-        seasons: new Set<string>(),
-        leagueIds: new Set<string>(),
-        leagueNames: new Set<string>(),
-        recentMatches: [],
-      };
-      away.matchesPlayed += 1;
-      if (resolvedWinnerSide === "Away") {
-        away.wins += 1;
-      } else if (resolvedWinnerSide === "Home") {
-        away.losses += 1;
-      }
-      away.seasons.add(season);
-      if (matchContext.leagueId) {
-        away.leagueIds.add(matchContext.leagueId);
-      }
-      if (matchContext.leagueName) {
-        away.leagueNames.add(matchContext.leagueName);
-      }
-      away.recentMatches = pushUniqueRecentMatches(away.recentMatches, [
-        {
-          source: "ttbl",
-          matchId: `${game.matchId}:${game.gameIndex}`,
-          occurredAt,
-          seasonOrYear: season,
-          event: game.gameday ?? null,
-          opponent: game.homePlayer.name ?? null,
-          opponentSourceId: game.homePlayer.id ?? null,
-          score: awayScore,
-          outcome:
-            resolvedWinnerSide === "Away"
-              ? "W"
-              : resolvedWinnerSide === "Home"
-                ? "L"
-                : null,
-        },
-      ]);
-      map.set(game.awayPlayer.id, away);
+  for (const game of games) {
+    if (game.format === "doubles") {
+      continue;
     }
+
+    const homeId = game.homePlayerId?.trim() ?? "";
+    const awayId = game.awayPlayerId?.trim() ?? "";
+    if (!homeId || !awayId) {
+      continue;
+    }
+
+    const occurredAt = toIsoFromUnixSeconds(Number(game.timestampMs));
+
+    const home = map.get(homeId) ?? {
+      matchesPlayed: 0,
+      wins: 0,
+      losses: 0,
+      seasons: new Set<string>(),
+      leagueIds: new Set<string>(),
+      leagueNames: new Set<string>(),
+      recentMatches: [],
+    };
+    home.matchesPlayed += 1;
+    if (game.winnerSide === "Home") {
+      home.wins += 1;
+    } else if (game.winnerSide === "Away") {
+      home.losses += 1;
+    }
+    home.seasons.add(game.season);
+    home.recentMatches = pushUniqueRecentMatches(home.recentMatches, [
+      {
+        source: "ttbl",
+        matchId: `${game.matchId}:${game.gameIndex}`,
+        occurredAt,
+        seasonOrYear: game.season,
+        event: game.gameday,
+        opponent: game.awayPlayerName,
+        opponentSourceId: awayId,
+        score: null,
+        outcome:
+          game.winnerSide === "Home" ? "W" : game.winnerSide === "Away" ? "L" : null,
+      },
+    ]);
+    map.set(homeId, home);
+
+    const away = map.get(awayId) ?? {
+      matchesPlayed: 0,
+      wins: 0,
+      losses: 0,
+      seasons: new Set<string>(),
+      leagueIds: new Set<string>(),
+      leagueNames: new Set<string>(),
+      recentMatches: [],
+    };
+    away.matchesPlayed += 1;
+    if (game.winnerSide === "Away") {
+      away.wins += 1;
+    } else if (game.winnerSide === "Home") {
+      away.losses += 1;
+    }
+    away.seasons.add(game.season);
+    away.recentMatches = pushUniqueRecentMatches(away.recentMatches, [
+      {
+        source: "ttbl",
+        matchId: `${game.matchId}:${game.gameIndex}`,
+        occurredAt,
+        seasonOrYear: game.season,
+        event: game.gameday,
+        opponent: game.homePlayerName,
+        opponentSourceId: homeId,
+        score: null,
+        outcome:
+          game.winnerSide === "Away" ? "W" : game.winnerSide === "Home" ? "L" : null,
+      },
+    ]);
+    map.set(awayId, away);
   }
 
   return map;
 }
 
 async function collectWTTAggregates(): Promise<Map<string, WTTAggregate>> {
-  const map = new Map<string, WTTAggregate>();
-  const players =
-    (await readJson<Record<string, WTTPlayer>>(
-      path.join(WTT_OUTPUT_DIR, "players.json"),
-      {},
-    )) ?? {};
-  const matches =
-    (await readJson<WTTMatch[]>(path.join(WTT_OUTPUT_DIR, "matches.json"), [])) ?? [];
+  const prisma = getPrismaClient();
+  if (!prisma) {
+    return new Map();
+  }
 
-  for (const [ittfId, row] of Object.entries(players)) {
-    map.set(ittfId, {
+  const [players, matches] = await Promise.all([
+    prisma.wttPlayer.findMany(),
+    prisma.wttMatch.findMany({
+      where: { isYouth: false },
+      select: {
+        id: true,
+        year: true,
+        tournament: true,
+        event: true,
+        playerAId: true,
+        playerAName: true,
+        playerXId: true,
+        playerXName: true,
+        finalSetsA: true,
+        finalSetsX: true,
+        winnerInferred: true,
+      },
+    }),
+  ]);
+
+  const map = new Map<string, WTTAggregate>();
+
+  for (const row of players) {
+    map.set(row.id, {
       matchesPlayed: 0,
       wins: 0,
       losses: 0,
-      nationality: row.nationality ?? null,
+      nationality: row.nationality,
       profileGender:
         row.gender === "M" || row.gender === "W" || row.gender === "mixed"
           ? row.gender
@@ -476,187 +301,104 @@ async function collectWTTAggregates(): Promise<Map<string, WTTAggregate>> {
       continue;
     }
 
-    const aId = match.players.a.ittf_id?.trim();
-    const xId = match.players.x.ittf_id?.trim();
+    const aId = match.playerAId?.trim();
+    const xId = match.playerXId?.trim();
     if (!aId || !xId) {
       continue;
     }
 
-    const year = match.year?.trim() ?? null;
+    const year = Number.isFinite(match.year) ? String(match.year) : null;
     const occurredAt = toIsoFromYear(year);
-    const scoreA = `${match.final_sets.a}-${match.final_sets.x}`;
-    const scoreX = `${match.final_sets.x}-${match.final_sets.a}`;
+    const scoreA = `${match.finalSetsA}-${match.finalSetsX}`;
+    const scoreX = `${match.finalSetsX}-${match.finalSetsA}`;
     const gender = inferWTTEventGender(match.event ?? null);
 
-    if (aId) {
-      const aggregate =
-        map.get(aId) ??
-        ({
-          matchesPlayed: 0,
-          wins: 0,
-          losses: 0,
-          nationality: match.players.a.association ?? null,
-          profileGender: "unknown",
-          genderCounts: { M: 0, W: 0, mixed: 0, unknown: 0 },
-          recentMatches: [],
-        } as WTTAggregate);
-      aggregate.matchesPlayed += 1;
-      if (match.winner_inferred === "A") {
-        aggregate.wins += 1;
-      } else if (match.winner_inferred === "X") {
-        aggregate.losses += 1;
-      }
-      aggregate.genderCounts[gender] += 1;
-      aggregate.recentMatches = pushUniqueRecentMatches(aggregate.recentMatches, [
-        {
-          source: "wtt",
-          matchId: match.match_id,
-          occurredAt,
-          seasonOrYear: year,
-          event: match.event ?? match.tournament ?? null,
-          opponent: match.players.x.name ?? xId ?? null,
-          opponentSourceId: xId ?? null,
-          score: scoreA,
-          outcome:
-            match.winner_inferred === "A"
-              ? "W"
-              : match.winner_inferred === "X"
-                ? "L"
-                : null,
-        },
-      ]);
-      map.set(aId, aggregate);
+    const a =
+      map.get(aId) ??
+      ({
+        matchesPlayed: 0,
+        wins: 0,
+        losses: 0,
+        nationality: null,
+        profileGender: "unknown",
+        genderCounts: { M: 0, W: 0, mixed: 0, unknown: 0 },
+        recentMatches: [],
+      } as WTTAggregate);
+    a.matchesPlayed += 1;
+    if (match.winnerInferred === "A") {
+      a.wins += 1;
+    } else if (match.winnerInferred === "X") {
+      a.losses += 1;
     }
+    a.genderCounts[gender] += 1;
+    a.recentMatches = pushUniqueRecentMatches(a.recentMatches, [
+      {
+        source: "wtt",
+        matchId: match.id,
+        occurredAt,
+        seasonOrYear: year,
+        event: match.event ?? match.tournament ?? null,
+        opponent: match.playerXName ?? xId,
+        opponentSourceId: xId,
+        score: scoreA,
+        outcome:
+          match.winnerInferred === "A" ? "W" : match.winnerInferred === "X" ? "L" : null,
+      },
+    ]);
+    map.set(aId, a);
 
-    if (xId) {
-      const aggregate =
-        map.get(xId) ??
-        ({
-          matchesPlayed: 0,
-          wins: 0,
-          losses: 0,
-          nationality: match.players.x.association ?? null,
-          profileGender: "unknown",
-          genderCounts: { M: 0, W: 0, mixed: 0, unknown: 0 },
-          recentMatches: [],
-        } as WTTAggregate);
-      aggregate.matchesPlayed += 1;
-      if (match.winner_inferred === "X") {
-        aggregate.wins += 1;
-      } else if (match.winner_inferred === "A") {
-        aggregate.losses += 1;
-      }
-      aggregate.genderCounts[gender] += 1;
-      aggregate.recentMatches = pushUniqueRecentMatches(aggregate.recentMatches, [
-        {
-          source: "wtt",
-          matchId: match.match_id,
-          occurredAt,
-          seasonOrYear: year,
-          event: match.event ?? match.tournament ?? null,
-          opponent: match.players.a.name ?? aId ?? null,
-          opponentSourceId: aId ?? null,
-          score: scoreX,
-          outcome:
-            match.winner_inferred === "X"
-              ? "W"
-              : match.winner_inferred === "A"
-                ? "L"
-                : null,
-        },
-      ]);
-      map.set(xId, aggregate);
+    const x =
+      map.get(xId) ??
+      ({
+        matchesPlayed: 0,
+        wins: 0,
+        losses: 0,
+        nationality: null,
+        profileGender: "unknown",
+        genderCounts: { M: 0, W: 0, mixed: 0, unknown: 0 },
+        recentMatches: [],
+      } as WTTAggregate);
+    x.matchesPlayed += 1;
+    if (match.winnerInferred === "X") {
+      x.wins += 1;
+    } else if (match.winnerInferred === "A") {
+      x.losses += 1;
     }
+    x.genderCounts[gender] += 1;
+    x.recentMatches = pushUniqueRecentMatches(x.recentMatches, [
+      {
+        source: "wtt",
+        matchId: match.id,
+        occurredAt,
+        seasonOrYear: year,
+        event: match.event ?? match.tournament ?? null,
+        opponent: match.playerAName ?? aId,
+        opponentSourceId: aId,
+        score: scoreX,
+        outcome:
+          match.winnerInferred === "X" ? "W" : match.winnerInferred === "A" ? "L" : null,
+      },
+    ]);
+    map.set(xId, x);
   }
 
   return map;
 }
 
-function collapseGenderSignals(signals: Iterable<PlayerGender>): PlayerGender {
-  let hasM = false;
-  let hasW = false;
-
-  for (const signal of signals) {
-    if (signal === "mixed") {
-      return "mixed";
-    }
-    if (signal === "M") {
-      hasM = true;
-    } else if (signal === "W") {
-      hasW = true;
-    }
-  }
-
-  if (hasM && hasW) {
+function inferGenderFromCounts(counts: Record<PlayerGender, number>): PlayerGender {
+  if (counts.mixed > 0 || (counts.M > 0 && counts.W > 0)) {
     return "mixed";
   }
-  if (hasM) {
+
+  if (counts.M > 0) {
     return "M";
   }
-  if (hasW) {
+
+  if (counts.W > 0) {
     return "W";
   }
+
   return "unknown";
-}
-
-function inferTTBLGenderFromLeagueNameSignals(leagueNames: Iterable<string>): PlayerGender {
-  let hasWomenSignal = false;
-  let hasMenSignal = false;
-
-  for (const rawName of leagueNames) {
-    const name = rawName.toLowerCase();
-    if (
-      name.includes("damen") ||
-      name.includes("women") ||
-      name.includes("frau") ||
-      name.includes("female") ||
-      name.includes("ladies")
-    ) {
-      hasWomenSignal = true;
-    }
-    if (
-      name.includes("herren") ||
-      name.includes("maenner") ||
-      name.includes("manner") ||
-      name.includes("men") ||
-      name.includes("male")
-    ) {
-      hasMenSignal = true;
-    }
-  }
-
-  if (hasWomenSignal && hasMenSignal) {
-    return "mixed";
-  }
-  if (hasWomenSignal) {
-    return "W";
-  }
-  if (hasMenSignal) {
-    return "M";
-  }
-  return "unknown";
-}
-
-function inferTTBLGenderFromLeagueSignals(
-  leagueIds: Set<string>,
-  leagueNames: Set<string>,
-  ttblLeagueGenderById: Map<string, PlayerGender>,
-): PlayerGender {
-  const signals = new Set<PlayerGender>();
-
-  for (const leagueId of leagueIds) {
-    const inferred = ttblLeagueGenderById.get(leagueId) ?? "unknown";
-    if (inferred !== "unknown") {
-      signals.add(inferred);
-    }
-  }
-
-  const leagueNameSignal = inferTTBLGenderFromLeagueNameSignals(leagueNames);
-  if (leagueNameSignal !== "unknown") {
-    signals.add(leagueNameSignal);
-  }
-
-  return collapseGenderSignals(signals);
 }
 
 function resolveWTTGenderForCanonicalPlayer(
@@ -831,11 +573,13 @@ function combineCanonicalRow(
   const mergedRecent = pushUniqueRecentMatches([], recentMatches).slice(0, maxRecentMatches);
   const mergeCandidates = mergeMap.get(player.canonicalKey) ?? [];
   const inferredGender = inferGenderFromCounts(genderCounts);
-  const ttblInferredGender = inferTTBLGenderFromLeagueSignals(
-    ttblLeagueIds,
-    ttblLeagueNames,
-    ttblLeagueGenderById,
-  );
+  const ttblInferredGender = ttblLeagueIds.size > 0 || ttblLeagueNames.size > 0
+    ? ttblLeagueIds.size > 0
+      ? [...ttblLeagueIds]
+          .map((leagueId) => ttblLeagueGenderById.get(leagueId) ?? "unknown")
+          .find((value) => value === "M" || value === "W") ?? "unknown"
+      : "unknown"
+    : "unknown";
   const { country, source: countrySource } = resolveCanonicalCountry({
     wttNationality: wttCountry,
     ttblNationality: ttblCountry,

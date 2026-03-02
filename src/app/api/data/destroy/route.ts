@@ -5,24 +5,9 @@ import {
   startActionJob,
 } from "@/lib/jobs/action-job";
 
-export async function POST(request: Request) {
+export async function POST() {
   try {
-    const body = (await request.json().catch(() => ({}))) as {
-      startYear?: number;
-      endYear?: number;
-      numGamedays?: number;
-      delayMs?: number;
-      includeYouth?: boolean;
-    };
-
-    const nowYear = new Date().getUTCFullYear();
-    const { alreadyRunning, status } = startActionJob("ttbl-all-time", {
-      startYear: body.startYear ?? 1995,
-      endYear: body.endYear ?? nowYear + 1,
-      numGamedays: body.numGamedays,
-      delayMs: body.delayMs ?? 120,
-      includeYouth: body.includeYouth ?? false,
-    });
+    const { alreadyRunning, status } = startActionJob("destroy-data", {});
 
     return NextResponse.json({
       ok: true,
@@ -45,7 +30,7 @@ export async function GET(request: Request) {
   try {
     const url = new URL(request.url);
     const jobId = url.searchParams.get("jobId")?.trim();
-    const status = jobId ? getActionJob(jobId) : getLatestActionJob("ttbl-all-time");
+    const status = jobId ? getActionJob(jobId) : getLatestActionJob("destroy-data");
 
     return NextResponse.json({
       ok: true,
@@ -53,8 +38,8 @@ export async function GET(request: Request) {
       message: status
         ? undefined
         : jobId
-          ? `No TTBL all-time scrape job found for jobId=${jobId}`
-          : "No TTBL all-time scrape job has been started yet.",
+          ? `No destroy-data job found for jobId=${jobId}`
+          : "No destroy-data job has been started yet.",
     });
   } catch (error) {
     return NextResponse.json(

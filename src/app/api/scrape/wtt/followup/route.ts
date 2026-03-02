@@ -1,8 +1,7 @@
 import { NextResponse } from "next/server";
 import {
-  getActionJob,
-  getLatestActionJob,
-  startActionJob,
+  getWTTFollowupStatus,
+  scheduleWTTFollowupInBackground,
 } from "@/lib/jobs/action-job";
 
 function parseYears(value: unknown): number[] {
@@ -22,68 +21,45 @@ function parseYears(value: unknown): number[] {
   return [];
 }
 
+export async function GET() {
+  return NextResponse.json({
+    ok: true,
+    followup: getWTTFollowupStatus(),
+  });
+}
+
 export async function POST(request: Request) {
   try {
     const body = (await request.json().catch(() => ({}))) as {
       years?: number[] | string;
+      delayMs?: number;
       pageSize?: number;
       maxPages?: number;
       maxEventsPerYear?: number;
       recentDays?: number;
-      delayMs?: number;
       tournamentScope?: "wtt_only" | "all";
       eventScope?: "singles_only" | "all";
       includeYouth?: boolean;
-      profileEnrichMaxPlayers?: number;
-      profileEnrichMinMatches?: number;
+      reason?: string;
     };
 
     const years = parseYears(body.years);
-    const { alreadyRunning, status } = startActionJob("wtt", {
-      years,
+    const followup = scheduleWTTFollowupInBackground({
+      years: years.length > 0 ? years : undefined,
+      delayMs: body.delayMs,
       pageSize: body.pageSize,
       maxPages: body.maxPages,
-      maxEventsPerYear: body.maxEventsPerYear ?? 18,
-      recentDays: body.recentDays ?? 45,
-      delayMs: body.delayMs,
+      maxEventsPerYear: body.maxEventsPerYear,
+      recentDays: body.recentDays,
       tournamentScope: body.tournamentScope ?? "wtt_only",
       eventScope: body.eventScope ?? "singles_only",
       includeYouth: body.includeYouth ?? false,
-      profileEnrichMaxPlayers: body.profileEnrichMaxPlayers ?? 600,
-      profileEnrichMinMatches: body.profileEnrichMinMatches ?? 2,
+      reason: body.reason ?? "manual-api-trigger",
     });
 
     return NextResponse.json({
       ok: true,
-      alreadyRunning,
-      jobId: status.jobId,
-      status,
-    });
-  } catch (error) {
-    return NextResponse.json(
-      {
-        ok: false,
-        error: error instanceof Error ? error.message : "unknown error",
-      },
-      { status: 500 },
-    );
-  }
-}
-
-export async function GET(request: Request) {
-  try {
-    const url = new URL(request.url);
-    const jobId = url.searchParams.get("jobId")?.trim();
-    const status = jobId ? getActionJob(jobId) : getLatestActionJob("wtt");
-
-    return NextResponse.json({
-      ok: true,
-      status: status ?? null,
-      message: status
-        ? undefined
-        : jobId
-          ? `No WTT scrape job found for jobId=${jobId}`
-          : "No WTT scrape job has been started yet.",
+      followup,
     });
   } catch (error) {
     return NextResponse.json(

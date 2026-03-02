@@ -42,89 +42,14 @@ export const WTT_OUTPUT_DIR = path.join(DATA_ROOT, "wtt");
 
 export const PLAYERS_OUTPUT_DIR = path.join(DATA_ROOT, "players");
 export const PLAYERS_REGISTRY_FILE = path.join(PLAYERS_OUTPUT_DIR, "player_registry.json");
-export const PLAYERS_MANUAL_FILE = path.join(PLAYERS_OUTPUT_DIR, "manual_merges.json");
+export const PLAYERS_MANUAL_FILE = path.join(PLAYERS_OUTPUT_DIR, "manual_merges");
 
 export const PIPELINE_DIR = path.join(DATA_ROOT, "pipeline");
 export const WTT_PIPELINE_STATE_FILE = path.join(PIPELINE_DIR, "wtt_state.json");
-
-interface TTBLLegacyIndexLike {
-  seasons?: string[];
-  results?: Array<{ season?: string }>;
-}
-
-interface TTBLMetadataLike {
-  season?: string;
-}
-
-function readJsonFile<T>(targetPath: string): T | null {
-  if (!fs.existsSync(targetPath)) {
-    return null;
-  }
-
-  try {
-    return JSON.parse(fs.readFileSync(targetPath, "utf8")) as T;
-  } catch {
-    return null;
-  }
-}
-
-function parseSeasonStart(value: string | null | undefined): number {
-  const match = value?.match(/^(\d{4})\s*[-/]\s*(\d{4})$/);
-  if (!match?.[1]) {
-    return 0;
-  }
-
-  const parsed = Number.parseInt(match[1], 10);
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
-function getLatestLegacySeasonDir(): string | null {
-  const index = readJsonFile<TTBLLegacyIndexLike>(TTBL_LEGACY_INDEX_FILE);
-  if (!index) {
-    return null;
-  }
-
-  const rawSeasons = new Set<string>();
-  for (const season of index.seasons ?? []) {
-    if (typeof season === "string" && season.trim()) {
-      rawSeasons.add(season.trim());
-    }
-  }
-  for (const row of index.results ?? []) {
-    if (typeof row.season === "string" && row.season.trim()) {
-      rawSeasons.add(row.season.trim());
-    }
-  }
-
-  const seasons = [...rawSeasons].sort((a, b) => parseSeasonStart(b) - parseSeasonStart(a));
-  for (const season of seasons) {
-    const dir = path.join(TTBL_SEASONS_DIR, season);
-    if (fs.existsSync(path.join(dir, "metadata.json"))) {
-      return dir;
-    }
-  }
-
-  return null;
-}
+export const SYNC_ACTIVITY_LOG_FILE = path.join(PIPELINE_DIR, "sync_activity_log.json");
 
 export function getTTBLReadDir(): string {
-  const latestLegacyDir = getLatestLegacySeasonDir();
-  const currentMetaPath = path.join(TTBL_OUTPUT_DIR, "metadata.json");
-  const currentMeta = readJsonFile<TTBLMetadataLike>(currentMetaPath);
-
-  if (!latestLegacyDir) {
-    return TTBL_OUTPUT_DIR;
-  }
-
-  const legacyMeta = readJsonFile<TTBLMetadataLike>(path.join(latestLegacyDir, "metadata.json"));
-  const currentStart = parseSeasonStart(currentMeta?.season);
-  const legacyStart = parseSeasonStart(legacyMeta?.season ?? path.basename(latestLegacyDir));
-
-  if (!currentMeta) {
-    return latestLegacyDir;
-  }
-
-  return legacyStart > currentStart ? latestLegacyDir : TTBL_OUTPUT_DIR;
+  return TTBL_OUTPUT_DIR;
 }
 
 export function toProjectRelative(absolutePath: string): string {

@@ -1,8 +1,17 @@
 import { ensureDir, removeDir } from "@/lib/fs";
+import { getPrismaClient } from "@/lib/db/prisma";
+import {
+  scheduleTTBLFollowupInBackground,
+  scheduleWTTFollowupInBackground,
+} from "@/lib/jobs/action-job";
 import { DATA_ROOT } from "@/lib/paths";
 import { rebuildPlayerRegistry } from "@/lib/players/registry";
 import { scrapeTTBLAllTime } from "@/lib/scrapers/ttbl";
 import { scrapeWTTAllTime } from "@/lib/scrapers/wtt";
+import {
+  listSyncActivityEntries,
+  replaceSyncActivityEntries,
+} from "@/lib/sync/activity-log";
 
 export interface CleanScrapeOptions {
   ttblStartYear?: number;
@@ -67,22 +76,67 @@ export async function runCleanScrape(
     onLog,
     `Master sync ranges: TTBL start years ${resolved.ttblStartYear}-${resolved.ttblEndYear}, WTT years ${resolved.wttStartYear}-${resolved.wttEndYear}.`,
   );
+  const preservedSyncEntries = await listSyncActivityEntries(5000);
+  const prisma = getPrismaClient();
+  if (!prisma) {
+    throw new Error("DATABASE_URL is required for clean scrape.");
+  }
+  emit(onLog, "Deleting existing relational dataset rows.");
+  await prisma.$transaction(async (tx) => {
+    await tx.playerMergeCandidate.deleteMany({});
+    await tx.playerCanonicalMember.deleteMany({});
+    await tx.playerCanonical.deleteMany({});
+    await tx.playerRegistryState.deleteMany({});
+    await tx.ttblGame.deleteMany({});
+    await tx.ttblMatch.deleteMany({});
+    await tx.ttblPlayerSeasonStat.deleteMany({});
+    await tx.ttblSeasonSummary.deleteMany({});
+    await tx.ttblPlayerProfile.deleteMany({});
+    await tx.ttblPlayer.deleteMany({});
+    await tx.wttMatchGame.deleteMany({});
+    await tx.wttMatch.deleteMany({});
+    await tx.wttPlayer.deleteMany({});
+  });
   emit(onLog, `Deleting existing local data root: ${DATA_ROOT}`);
   await removeDir(DATA_ROOT);
   await ensureDir(DATA_ROOT);
-  emit(onLog, "Local data root recreated.");
+  if (preservedSyncEntries.length > 0) {
+    await replaceSyncActivityEntries(preservedSyncEntries);
+    emit(
+      onLog,
+      `Restored ${preservedSyncEntries.length} persisted background sync log entries.`,
+    );
+  }
+  emit(onLog, "Relational tables reset. Local data root cleaned.");
 
   const ttbl = await scrapeTTBLAllTime({
     startYear: resolved.ttblStartYear,
     endYear: resolved.ttblEndYear,
     numGamedays: resolved.ttblNumGamedays,
     delayMs: resolved.delayMs,
+    includeYouth: false,
     onLog,
   });
   emit(
     onLog,
     `TTBL scrape complete. Seasons=${ttbl.discoveredSeasons.length}, latest=${ttbl.discoveredSeasons[0] ?? "none"}.`,
   );
+  if (
+    ttbl.current &&
+    ((ttbl.current.ongoingMatches ?? 0) > 0 || (ttbl.current.notFinishedMatches ?? 0) > 0)
+  ) {
+    const followup = scheduleTTBLFollowupInBackground({
+      season: ttbl.current.metadata.season,
+      delayMs: 120000,
+      includeYouth: false,
+      backgroundReason: "auto-after-clean-job",
+      reason: "auto-after-clean-job",
+    });
+    emit(
+      onLog,
+      `TTBL background follow-up scheduled for ${followup.scheduledFor} (ongoing=${ttbl.current.ongoingMatches}, notFinished=${ttbl.current.notFinishedMatches}).`,
+    );
+  }
 
   const wtt = await scrapeWTTAllTime({
     startYear: resolved.wttStartYear,
@@ -92,7 +146,7 @@ export async function runCleanScrape(
     delayMs: resolved.delayMs,
     tournamentScope: "all",
     eventScope: "singles_only",
-    includeYouth: true,
+    includeYouth: false,
     profileEnrichMaxPlayers: 0,
     onLog,
   });
@@ -100,6 +154,21 @@ export async function runCleanScrape(
     onLog,
     `WTT scrape complete. Years=${wtt.discoveredYears.length}, matches=${wtt.scrape.matches}, players=${wtt.scrape.players}.`,
   );
+  if ((wtt.scrape.ongoingMatches ?? 0) > 0 || (wtt.scrape.notFinishedMatches ?? 0) > 0) {
+    const followup = scheduleWTTFollowupInBackground({
+      years: wtt.scrape.years,
+      delayMs: 120000,
+      tournamentScope: "wtt_only",
+      eventScope: "singles_only",
+      includeYouth: false,
+      backgroundReason: "auto-after-clean-job",
+      reason: "auto-after-clean-job",
+    });
+    emit(
+      onLog,
+      `WTT background follow-up scheduled for ${followup.scheduledFor} (ongoing=${wtt.scrape.ongoingMatches}, notFinished=${wtt.scrape.notFinishedMatches}).`,
+    );
+  }
 
   emit(onLog, "Rebuilding player merge registry...");
   const registry = await rebuildPlayerRegistry();

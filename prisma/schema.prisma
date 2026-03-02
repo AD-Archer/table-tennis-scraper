@@ -1,0 +1,312 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum SyncActivitySource {
+  ttbl
+  wtt
+}
+
+enum SyncActivityLevel {
+  info
+  warn
+  error
+}
+
+model SyncActivity {
+  id         String             @id @default(cuid())
+  occurredAt DateTime           @default(now())
+  source     SyncActivitySource
+  level      SyncActivityLevel
+  message    String
+  details    String?
+  createdAt  DateTime           @default(now())
+
+  @@index([occurredAt])
+  @@index([source, occurredAt])
+}
+
+model TtblSeasonSummary {
+  season               String   @id
+  scrapeDate           DateTime
+  totalMatches         Int
+  totalGamedays        Int
+  youthFilteredMatches Int      @default(0)
+  youthIncludedMatches Int      @default(0)
+  notFinishedMatches   Int      @default(0)
+  ongoingMatches       Int      @default(0)
+  uniquePlayers        Int
+  playersWithStats     Int
+  totalGamesProcessed  Int
+  source               String
+  version              String
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  @@index([scrapeDate])
+}
+
+model TtblPlayer {
+  id         String   @id
+  firstName  String?
+  lastName   String?
+  fullName   String?
+  imageUrl   String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
+model TtblMatch {
+  id            String    @id
+  season        String
+  gameday       String
+  timestampMs   BigInt
+  matchState    String
+  isYouth       Boolean   @default(false)
+  homeTeamId    String?
+  homeTeamName  String?
+  homeTeamRank  Int?
+  homeGameWins  Int?
+  homeSetWins   Int?
+  awayTeamId    String?
+  awayTeamName  String?
+  awayTeamRank  Int?
+  awayGameWins  Int?
+  awaySetWins   Int?
+  gamesCount    Int       @default(0)
+  venue         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  games         TtblGame[]
+
+  @@index([season, timestampMs])
+  @@index([season, isYouth])
+  @@index([season, matchState])
+}
+
+model TtblGame {
+  id             String   @id @default(cuid())
+  matchId        String
+  season         String
+  gameday        String
+  timestampMs    BigInt
+  gameIndex      Int
+  format         String?
+  isYouth        Boolean  @default(false)
+  gameState      String
+  winnerSide     String?
+  homePlayerId   String?
+  homePlayerName String?
+  awayPlayerId   String?
+  awayPlayerName String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  match          TtblMatch @relation(fields: [matchId], references: [id], onDelete: Cascade)
+
+  @@unique([matchId, gameIndex])
+  @@index([season, timestampMs])
+  @@index([season, isYouth])
+}
+
+model TtblPlayerSeasonStat {
+  id          String   @id @default(cuid())
+  season      String
+  playerId    String
+  name        String
+  gamesPlayed Int
+  wins        Int
+  losses      Int
+  winRate     Int
+  lastMatchId String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([season, playerId])
+  @@index([season, winRate])
+}
+
+model TtblPlayerProfile {
+  sourcePlayerId       String   @id
+  stablePlayerId       String?
+  seasonPlayerId       String?
+  fetchedAt            DateTime
+  fullName             String
+  firstName            String?
+  lastName             String?
+  nationality          String?
+  nationalitySecondary String?
+  birthdayUnix         Int?
+  heightCm             Float?
+  weightKg             Float?
+  hand                 String?
+  racketPosture        String?
+  role                 String?
+  currentClub          String?
+  outfitter            String?
+  outfitterWebsite     String?
+  seasonLabel          String?
+  imageUrl             String?
+  actionImageUrl       String?
+  cardImageUrl         String?
+  socialInstagram      String?
+  socialYoutube        String?
+  socialWebsite        String?
+  socialTiktok         String?
+  socialFacebook       String?
+  metricsTtblRank      Int?
+  metricsWorldRank     Int?
+  metricsQttrValue     Int?
+  metricsGameWins      Int?
+  metricsGameLosses    Int?
+  metricsSetWins       Int?
+  metricsSetLosses     Int?
+  metricsBallWins      Int?
+  metricsBallLosses    Int?
+  sampleGames          Int      @default(0)
+  sampleHomeGames      Int      @default(0)
+  sampleAwayGames      Int      @default(0)
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+}
+
+model WttPlayer {
+  id                 String   @id
+  firstName          String?
+  lastName           String?
+  fullName           String?
+  dob                String?
+  nationality        String?
+  team               String?
+  countryName        String?
+  organizationName   String?
+  gender             String?
+  age                Int?
+  handedness         String?
+  style              String?
+  worldRanking       Int?
+  worldRankingPoints Int?
+  headshotUrl        String?
+  matchesPlayed      Int      @default(0)
+  wins               Int      @default(0)
+  losses             Int      @default(0)
+  sources            String[]
+  lastSeenAt         DateTime?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+}
+
+model WttMatch {
+  id              String        @id
+  sourceMatchId   String?
+  eventId         String?
+  subEventCode    String?
+  year            Int?
+  lastUpdatedAt   DateTime?
+  tournament      String?
+  event           String?
+  stage           String?
+  round           String?
+  resultStatus    String?
+  notFinished     Boolean       @default(false)
+  ongoing         Boolean       @default(false)
+  isYouth         Boolean       @default(false)
+  walkover        Boolean       @default(false)
+  winnerRaw       Int?
+  winnerInferred  String?
+  finalSetsA      Int           @default(0)
+  finalSetsX      Int           @default(0)
+  playerAId       String?
+  playerAName     String?
+  playerAAssoc    String?
+  playerXId       String?
+  playerXName     String?
+  playerXAssoc    String?
+  sourceType      String?
+  sourceBaseUrl   String?
+  sourceListId    String?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  games           WttMatchGame[]
+
+  @@index([year, ongoing])
+  @@index([year, notFinished])
+  @@index([year, isYouth])
+  @@index([eventId, subEventCode])
+}
+
+model WttMatchGame {
+  id         String   @id @default(cuid())
+  matchId    String
+  gameNumber Int
+  aPoints    Int
+  xPoints    Int
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  match      WttMatch @relation(fields: [matchId], references: [id], onDelete: Cascade)
+
+  @@unique([matchId, gameNumber])
+}
+
+model PlayerRegistryState {
+  id                 Int      @id
+  generatedAt        DateTime
+  sourcePlayers      Int
+  ttblSourcePlayers  Int
+  wttSourcePlayers   Int
+  canonicalPlayers   Int
+  mergedPlayers      Int
+  candidates         Int
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+}
+
+model PlayerCanonical {
+  canonicalKey    String                 @id
+  displayName     String
+  normalizedNames String[]
+  sourceCount     Int
+  memberCount     Int
+  createdAt       DateTime               @default(now())
+  updatedAt       DateTime               @updatedAt
+  members         PlayerCanonicalMember[]
+}
+
+model PlayerCanonicalMember {
+  id           String          @id @default(cuid())
+  canonicalKey String
+  source       String
+  sourceId     String
+  sourceKey    String          @unique
+  names        String[]
+  seasons      String[]
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+  canonical    PlayerCanonical @relation(fields: [canonicalKey], references: [canonicalKey], onDelete: Cascade)
+
+  @@index([canonicalKey])
+  @@index([source, sourceId])
+}
+
+model PlayerMergeCandidate {
+  id               String   @id @default(cuid())
+  leftCanonicalKey String
+  rightCanonicalKey String
+  leftName         String
+  rightName        String
+  reason           String
+  createdAt        DateTime @default(now())
+
+  @@index([leftCanonicalKey])
+  @@index([rightCanonicalKey])
+}
+
+model PlayerManualAlias {
+  key          String   @id
+  canonicalKey String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}

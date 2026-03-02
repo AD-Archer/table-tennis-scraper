@@ -1,16 +1,4 @@
-import path from "node:path";
-import { promises as fs } from "node:fs";
-import { assertDataPath, ensureDir, fileExists, readJson, writeJson } from "@/lib/fs";
-import {
-  PLAYERS_MANUAL_FILE,
-  PLAYERS_OUTPUT_DIR,
-  PLAYERS_REGISTRY_FILE,
-  TTBL_LEGACY_INDEX_FILE,
-  TTBL_OUTPUT_DIR,
-  TTBL_SEASONS_DIR,
-  WTT_OUTPUT_DIR,
-  getTTBLReadDir,
-} from "@/lib/paths";
+import { getPrismaClient } from "@/lib/db/prisma";
 import { getTTBLPlayerProfile, readTTBLPlayerProfiles } from "@/lib/ttbl/player-profiles";
 import {
   CanonicalPlayer,
@@ -18,10 +6,7 @@ import {
   PlayerMergeCandidate,
   PlayerRegistryManualConfig,
   PlayerRegistrySnapshot,
-  TTBLMetadata,
   TTBLPlayerProfile,
-  WTTMatch,
-  WTTPlayer,
 } from "@/lib/types";
 import { inferWTTEventGender, isWTTGenderedSinglesEvent } from "@/lib/wtt/events";
 
@@ -58,6 +43,10 @@ const DEFAULT_MANUAL_CONFIG: PlayerRegistryManualConfig = {
 };
 
 type RegistryLogFn = (message: string) => void;
+
+const registryGlobal = globalThis as typeof globalThis & {
+  __playerRegistrySnapshotCompat?: PlayerRegistrySnapshot | null;
+};
 
 const COUNTRY_CODE_ALIASES: Record<string, string> = {
   GER: "DEU",
@@ -110,6 +99,32 @@ const COUNTRY_NAME_ALIASES: Record<string, string> = {
   "REPUBLIC OF KOREA": "KOR",
 };
 
+function getRegistryPrismaClient() {
+  const prisma = getPrismaClient();
+  if (!prisma) {
+    throw new Error("DATABASE_URL is required in Postgres mode.");
+  }
+
+  return prisma;
+}
+
+function hasRegistryTables(
+  prisma: NonNullable<ReturnType<typeof getPrismaClient>>,
+): prisma is NonNullable<ReturnType<typeof getPrismaClient>> & {
+  playerRegistryState: { findUnique: (...args: unknown[]) => Promise<unknown> };
+  playerCanonical: { findMany: (...args: unknown[]) => Promise<unknown[]> };
+  playerCanonicalMember: { createMany: (...args: unknown[]) => Promise<unknown> };
+  playerMergeCandidate: { findMany: (...args: unknown[]) => Promise<unknown[]> };
+} {
+  const candidate = prisma as unknown as Record<string, unknown>;
+  return Boolean(
+    candidate.playerRegistryState &&
+      candidate.playerCanonical &&
+      candidate.playerCanonicalMember &&
+      candidate.playerMergeCandidate,
+  );
+}
+
 function emit(log: RegistryLogFn | undefined, message: string): void {
   if (!log) {
     return;
@@ -131,20 +146,6 @@ function normalizeName(value: string): string {
 
 function cleanName(value: string): string {
   return value.replace(/\s+/g, " ").trim();
-}
-
-function buildTTBLName(row: {
-  firstName?: string;
-  lastName?: string;
-  name?: string;
-}): string {
-  const direct = cleanName(row.name ?? "");
-  if (direct) {
-    return direct;
-  }
-
-  const joined = cleanName(`${row.firstName ?? ""} ${row.lastName ?? ""}`);
-  return joined || "Unknown";
 }
 
 function buildTTBLCanonicalHint(
@@ -258,6 +259,44 @@ function unixSecondsToIsoDate(value: number | null | undefined): string | null {
   return date.toISOString().slice(0, 10);
 }
 
+function extractBirthYear(value: string | null | undefined): number | null {
+  if (!value) {
+    return null;
+  }
+
+  const match = value.match(/^(\d{4})/);
+  if (!match?.[1]) {
+    return null;
+  }
+
+  const year = Number.parseInt(match[1], 10);
+  return Number.isFinite(year) ? year : null;
+}
+
+function hasCloseBirthYearMatch(
+  wttDob: string | null | undefined,
+  ttblDobs: Set<string>,
+  toleranceYears = 2,
+): boolean {
+  const wttYear = extractBirthYear(wttDob ?? null);
+  if (!Number.isFinite(wttYear)) {
+    return false;
+  }
+
+  for (const dob of ttblDobs) {
+    const ttblYear = extractBirthYear(dob);
+    if (!Number.isFinite(ttblYear)) {
+      continue;
+    }
+
+    if (Math.abs((wttYear as number) - (ttblYear as number)) <= toleranceYears) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function splitCountrySuffix(value: string): { name: string; country: string | null } {
   const match = value.match(/\(([^)]+)\)\s*$/);
   if (!match?.[1]) {
@@ -333,115 +372,278 @@ function buildNameKey(displayName: string, fallbackCountry?: string | null): str
   return `${parts.surname}|${parts.given}`;
 }
 
-async function listSeasonDirectories(): Promise<string[]> {
-  if (!(await fileExists(TTBL_SEASONS_DIR))) {
-    return [];
-  }
-
-  assertDataPath(TTBL_SEASONS_DIR);
-  const entries = await fs.readdir(TTBL_SEASONS_DIR, { withFileTypes: true });
-  return entries
-    .filter((entry) => entry.isDirectory())
-    .map((entry) => entry.name)
-    .sort((a, b) => b.localeCompare(a));
+function toTimestamp(value: string | null | undefined): number {
+  const parsed = Date.parse(value ?? "");
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
-async function safeMtime(filePath: string): Promise<number> {
-  if (!(await fileExists(filePath))) {
-    return 0;
-  }
+async function latestSourceTimestamp(): Promise<number> {
+  const prisma = getRegistryPrismaClient();
+  const prismaAny = prisma as unknown as {
+    ttblSeasonSummary?: {
+      findFirst: (args: unknown) => Promise<{ scrapeDate: Date } | null>;
+    };
+  };
+  const [latestTtblSeasonCompat, latestTtblMatchCompat, latestWttMatch, latestWttPlayer] =
+    await Promise.all([
+      prismaAny.ttblSeasonSummary?.findFirst
+        ? prismaAny.ttblSeasonSummary.findFirst({
+            orderBy: { scrapeDate: "desc" },
+            select: { scrapeDate: true },
+          })
+        : Promise.resolve(null),
+      prisma.ttblMatch.findFirst({
+        orderBy: { updatedAt: "desc" },
+        select: { updatedAt: true },
+      }),
+    prisma.wttMatch.findFirst({
+      orderBy: { updatedAt: "desc" },
+      select: { updatedAt: true },
+    }),
+    prisma.wttPlayer.findFirst({
+      orderBy: { updatedAt: "desc" },
+      select: { updatedAt: true },
+    }),
+  ]);
 
-  assertDataPath(filePath);
-
-  try {
-    const stat = await fs.stat(filePath);
-    return stat.mtimeMs;
-  } catch {
-    return 0;
-  }
-}
-
-async function latestSourceMtime(): Promise<number> {
-  const seasonNames = await listSeasonDirectories();
-  const seasonMetadataFiles = seasonNames.map((season) =>
-    path.join(TTBL_SEASONS_DIR, season, "metadata.json"),
-  );
-
-  const files = [
-    TTBL_LEGACY_INDEX_FILE,
-    path.join(TTBL_OUTPUT_DIR, "metadata.json"),
-    path.join(getTTBLReadDir(), "metadata.json"),
-    path.join(WTT_OUTPUT_DIR, "dataset.json"),
-    path.join(WTT_OUTPUT_DIR, "players.json"),
-    ...seasonMetadataFiles,
+  const timestamps = [
+    latestTtblSeasonCompat?.scrapeDate.getTime() ?? 0,
+    latestTtblMatchCompat?.updatedAt.getTime() ?? 0,
+    latestWttMatch?.updatedAt.getTime() ?? 0,
+    latestWttPlayer?.updatedAt.getTime() ?? 0,
   ];
 
-  const mtimes = await Promise.all(files.map((filePath) => safeMtime(filePath)));
-  return Math.max(0, ...mtimes);
+  return Math.max(0, ...timestamps);
 }
 
 async function isRegistryStale(): Promise<boolean> {
-  const [registryMtime, sourceMtime] = await Promise.all([
-    safeMtime(PLAYERS_REGISTRY_FILE),
-    latestSourceMtime(),
+  const [registry, sourceTimestamp] = await Promise.all([
+    getPlayerRegistrySnapshot(),
+    latestSourceTimestamp(),
   ]);
 
-  return sourceMtime > registryMtime;
+  const registryTimestamp = toTimestamp(registry?.generatedAt);
+  return sourceTimestamp > registryTimestamp;
 }
 
-async function collectTTBLPlayers(log?: RegistryLogFn): Promise<SourcePlayerInput[]> {
-  const ttblProfiles = await readTTBLPlayerProfiles();
-  const out: SourcePlayerInput[] = [];
-  const dedupe = new Set<string>();
+async function collectTTBLPlayersFromDb(
+  ttblProfiles: Record<string, TTBLPlayerProfile>,
+  log?: RegistryLogFn,
+): Promise<SourcePlayerInput[]> {
+  const prisma = getRegistryPrismaClient();
 
-  const currentDir = getTTBLReadDir();
-  const dirs = new Map<string, string>();
+  try {
+    const seasonStats = await prisma.ttblPlayerSeasonStat.findMany({
+      select: {
+        season: true,
+        playerId: true,
+        name: true,
+      },
+    });
+    if (seasonStats.length === 0) {
+      emit(log, "TTBL player registry source: Postgres (0 season stats).");
+      return [];
+    }
 
-  const currentMeta = await readJson<TTBLMetadata>(path.join(currentDir, "metadata.json"), null);
-  dirs.set(currentDir, currentMeta?.season ?? "current");
+    const playerIds = [...new Set(seasonStats.map((row) => row.playerId).filter(Boolean))];
+    const players = await prisma.ttblPlayer.findMany({
+      where: {
+        id: { in: playerIds },
+      },
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        fullName: true,
+      },
+    });
+    const playerById = new Map(players.map((row) => [row.id, row]));
 
-  const seasonNames = await listSeasonDirectories();
-  for (const seasonName of seasonNames) {
-    dirs.set(path.join(TTBL_SEASONS_DIR, seasonName), seasonName);
-  }
-
-  for (const [dirPath, season] of dirs.entries()) {
-    const players =
-      (await readJson<
-        Array<{ id?: string; firstName?: string; lastName?: string; name?: string }>
-      >(path.join(dirPath, "players", "unique_players.json"), [])) ?? [];
-
-    for (const row of players) {
-      const displayName = buildTTBLName(row);
-      const normalizedName = normalizeName(displayName);
-      const hasId = Boolean(row.id?.trim());
-      if (!hasId && normalizedName === "unknown") {
+    const out: SourcePlayerInput[] = [];
+    const dedupe = new Set<string>();
+    for (const row of seasonStats) {
+      const sourceId = row.playerId.trim();
+      if (!sourceId) {
         continue;
       }
 
-      const sourceId = row.id?.trim() || `name:${normalizedName}`;
-      const dedupeKey = `ttbl:${sourceId}:${season}`;
+      const profileRow = playerById.get(sourceId);
+      const displayName =
+        cleanName(profileRow?.fullName ?? "") ||
+        cleanName(
+          `${profileRow?.firstName ?? ""} ${profileRow?.lastName ?? ""}`,
+        ) ||
+        cleanName(row.name) ||
+        sourceId;
+      const normalizedName = normalizeName(displayName);
+      if (!normalizedName || normalizedName === "unknown") {
+        continue;
+      }
 
-      if (!normalizedName || dedupe.has(dedupeKey)) {
+      const dedupeKey = `ttbl:${sourceId}:${row.season}`;
+      if (dedupe.has(dedupeKey)) {
         continue;
       }
       dedupe.add(dedupeKey);
 
-      const sourceProfile = row.id?.trim() ? (ttblProfiles[row.id.trim()] ?? null) : null;
-      const canonicalHint = buildTTBLCanonicalHint(normalizedName, sourceProfile);
-
+      const sourceProfile = ttblProfiles[sourceId] ?? null;
       out.push({
         source: "ttbl",
         sourceId,
         displayName,
         normalizedName,
-        canonicalHint,
-        season,
+        canonicalHint: buildTTBLCanonicalHint(normalizedName, sourceProfile),
+        season: row.season,
         country: normalizeCountry(sourceProfile?.nationality ?? null),
         dobIso: unixSecondsToIsoDate(sourceProfile?.birthdayUnix ?? null),
       });
     }
+
+    emit(log, `TTBL player registry source: Postgres (${out.length} rows).`);
+    return out;
+  } catch (error) {
+    throw new Error(
+      `TTBL player registry Postgres read failed: ${
+        error instanceof Error ? error.message : "unknown error"
+      }`,
+    );
   }
+}
+
+async function collectWTTPlayersFromDb(
+  log?: RegistryLogFn,
+): Promise<SourcePlayerInput[]> {
+  const prisma = getRegistryPrismaClient();
+
+  try {
+    const [players, matches] = await Promise.all([
+      prisma.wttPlayer.findMany({
+        select: {
+          id: true,
+          firstName: true,
+          lastName: true,
+          fullName: true,
+          dob: true,
+          nationality: true,
+          gender: true,
+        },
+      }),
+      prisma.wttMatch.findMany({
+        select: {
+          year: true,
+          event: true,
+          playerAId: true,
+          playerXId: true,
+        },
+      }),
+    ]);
+
+    const yearsByPlayer = new Map<string, Set<string>>();
+    const gendersByPlayer = new Map<string, Set<PlayerGender>>();
+
+    for (const match of matches) {
+      if (!isWTTGenderedSinglesEvent(match.event ?? null)) {
+        continue;
+      }
+
+      const year = match.year ? String(match.year) : "";
+      if (!year) {
+        continue;
+      }
+      const inferredGender = inferWTTEventGender(match.event ?? null);
+      const genderFromEvent =
+        inferredGender === "M" || inferredGender === "W" ? inferredGender : null;
+
+      const aId = (match.playerAId ?? "").trim();
+      if (aId) {
+        const years = yearsByPlayer.get(aId) ?? new Set<string>();
+        years.add(year);
+        yearsByPlayer.set(aId, years);
+        if (genderFromEvent) {
+          const genders = gendersByPlayer.get(aId) ?? new Set<PlayerGender>();
+          genders.add(genderFromEvent);
+          gendersByPlayer.set(aId, genders);
+        }
+      }
+
+      const xId = (match.playerXId ?? "").trim();
+      if (xId) {
+        const years = yearsByPlayer.get(xId) ?? new Set<string>();
+        years.add(year);
+        yearsByPlayer.set(xId, years);
+        if (genderFromEvent) {
+          const genders = gendersByPlayer.get(xId) ?? new Set<PlayerGender>();
+          genders.add(genderFromEvent);
+          gendersByPlayer.set(xId, genders);
+        }
+      }
+    }
+
+    const out: SourcePlayerInput[] = [];
+    for (const row of players) {
+      const displayName =
+        cleanName(row.fullName ?? "") ||
+        cleanName(`${row.firstName ?? ""} ${row.lastName ?? ""}`) ||
+        row.id;
+      const normalizedName = normalizeName(displayName);
+      if (!normalizedName) {
+        continue;
+      }
+
+      const profileGender = normalizeSourceGender(row.gender ?? null);
+      const genderSet = gendersByPlayer.get(row.id) ?? new Set<PlayerGender>();
+      const eventGender =
+        genderSet.size === 1
+          ? [...genderSet][0]
+          : genderSet.size > 1
+            ? "mixed"
+            : null;
+      const mergedGender = profileGender ?? eventGender ?? null;
+
+      const years = [...(yearsByPlayer.get(row.id) ?? new Set<string>())].sort((a, b) =>
+        b.localeCompare(a),
+      );
+      if (years.length === 0) {
+        out.push({
+          source: "wtt",
+          sourceId: row.id,
+          displayName,
+          normalizedName,
+          dobIso: normalizeDateToIso(row.dob),
+          country: normalizeCountry(row.nationality),
+          gender: mergedGender,
+        });
+        continue;
+      }
+
+      for (const season of years) {
+        out.push({
+          source: "wtt",
+          sourceId: row.id,
+          displayName,
+          normalizedName,
+          season,
+          dobIso: normalizeDateToIso(row.dob),
+          country: normalizeCountry(row.nationality),
+          gender: mergedGender,
+        });
+      }
+    }
+
+    emit(log, `WTT player registry source: Postgres (${out.length} rows).`);
+    return out;
+  } catch (error) {
+    throw new Error(
+      `WTT player registry Postgres read failed: ${
+        error instanceof Error ? error.message : "unknown error"
+      }`,
+    );
+  }
+}
+
+async function collectTTBLPlayers(log?: RegistryLogFn): Promise<SourcePlayerInput[]> {
+  const ttblProfiles = await readTTBLPlayerProfiles();
+  const out = await collectTTBLPlayersFromDb(ttblProfiles, log);
 
   const missingWithKnownStable = out.filter(
     (row) => row.sourceId && !row.sourceId.startsWith("name:") && !row.canonicalHint,
@@ -507,108 +709,8 @@ async function collectTTBLPlayers(log?: RegistryLogFn): Promise<SourcePlayerInpu
   return out;
 }
 
-async function collectWTTPlayers(): Promise<SourcePlayerInput[]> {
-  const [players, matches] = await Promise.all([
-    readJson<Record<string, WTTPlayer>>(path.join(WTT_OUTPUT_DIR, "players.json"), {}),
-    readJson<WTTMatch[]>(path.join(WTT_OUTPUT_DIR, "matches.json"), []),
-  ]);
-  const playersById = players ?? {};
-  const allMatches = matches ?? [];
-
-  const out: SourcePlayerInput[] = [];
-  const yearsByPlayer = new Map<string, Set<string>>();
-  const gendersByPlayer = new Map<string, Set<PlayerGender>>();
-
-  for (const match of allMatches) {
-    if (!isWTTGenderedSinglesEvent(match.event)) {
-      continue;
-    }
-
-    const year = (match.year ?? "").trim();
-    if (!year) {
-      continue;
-    }
-    const inferredGender = inferWTTEventGender(match.event);
-    const genderFromEvent = inferredGender === "M" || inferredGender === "W" ? inferredGender : null;
-
-    const aId = (match.players.a.ittf_id ?? "").trim();
-    if (aId) {
-      const years = yearsByPlayer.get(aId) ?? new Set<string>();
-      years.add(year);
-      yearsByPlayer.set(aId, years);
-      if (genderFromEvent) {
-        const genders = gendersByPlayer.get(aId) ?? new Set<PlayerGender>();
-        genders.add(genderFromEvent);
-        gendersByPlayer.set(aId, genders);
-      }
-    }
-
-    const xId = (match.players.x.ittf_id ?? "").trim();
-    if (xId) {
-      const years = yearsByPlayer.get(xId) ?? new Set<string>();
-      years.add(year);
-      yearsByPlayer.set(xId, years);
-      if (genderFromEvent) {
-        const genders = gendersByPlayer.get(xId) ?? new Set<PlayerGender>();
-        genders.add(genderFromEvent);
-        gendersByPlayer.set(xId, genders);
-      }
-    }
-  }
-
-  for (const [ittfId, row] of Object.entries(playersById)) {
-    const displayName =
-      cleanName(row.full_name ?? "") ||
-      cleanName(`${row.first_name ?? ""} ${row.last_name ?? ""}`) ||
-      ittfId;
-    const normalizedName = normalizeName(displayName);
-
-    if (!normalizedName) {
-      continue;
-    }
-
-    const profileGender = normalizeSourceGender(row.gender ?? null);
-    const genderSet = gendersByPlayer.get(ittfId) ?? new Set<PlayerGender>();
-    const eventGender =
-      genderSet.size === 1
-        ? [...genderSet][0]
-        : genderSet.size > 1
-          ? "mixed"
-          : null;
-    const mergedGender = profileGender ?? eventGender ?? null;
-
-    const sourceYears = [...(yearsByPlayer.get(ittfId) ?? new Set<string>())].sort((a, b) =>
-      b.localeCompare(a),
-    );
-
-    if (sourceYears.length === 0) {
-      out.push({
-        source: "wtt",
-        sourceId: ittfId,
-        displayName,
-        normalizedName,
-        dobIso: normalizeDateToIso(row.dob),
-        country: normalizeCountry(row.nationality),
-        gender: mergedGender,
-      });
-      continue;
-    }
-
-    for (const season of sourceYears) {
-      out.push({
-        source: "wtt",
-        sourceId: ittfId,
-        displayName,
-        normalizedName,
-        season,
-        dobIso: normalizeDateToIso(row.dob),
-        country: normalizeCountry(row.nationality),
-        gender: mergedGender,
-      });
-    }
-  }
-
-  return out;
+async function collectWTTPlayers(log?: RegistryLogFn): Promise<SourcePlayerInput[]> {
+  return await collectWTTPlayersFromDb(log);
 }
 
 function autoConsolidateTTBLStableHints(
@@ -716,12 +818,157 @@ function autoConsolidateTTBLStableHints(
   return issues;
 }
 
+function autoConsolidateWTTIdentityHints(
+  sourcePlayers: SourcePlayerInput[],
+  log?: RegistryLogFn,
+): PlayerMergeCandidate[] {
+  interface WTTIdentity {
+    sourceId: string;
+    displayName: string;
+    countries: Set<string>;
+    dobIsoValues: Set<string>;
+    genders: Set<PlayerGender>;
+  }
+
+  const byNameKey = new Map<string, Map<string, WTTIdentity>>();
+  for (const row of sourcePlayers) {
+    if (row.source !== "wtt") {
+      continue;
+    }
+
+    const nameKey = buildNameKey(row.displayName, row.country);
+    if (!nameKey) {
+      continue;
+    }
+
+    const byId = byNameKey.get(nameKey) ?? new Map<string, WTTIdentity>();
+    const existing = byId.get(row.sourceId) ?? {
+      sourceId: row.sourceId,
+      displayName: row.displayName,
+      countries: new Set<string>(),
+      dobIsoValues: new Set<string>(),
+      genders: new Set<PlayerGender>(),
+    };
+    if (row.country) {
+      existing.countries.add(row.country);
+    }
+    if (row.dobIso) {
+      existing.dobIsoValues.add(row.dobIso);
+    }
+    if (row.gender && row.gender !== "unknown") {
+      existing.genders.add(row.gender);
+    }
+    byId.set(row.sourceId, existing);
+    byNameKey.set(nameKey, byId);
+  }
+
+  let mergedGroups = 0;
+  let reassignedRows = 0;
+  const issues: PlayerMergeCandidate[] = [];
+  const issueDedupe = new Set<string>();
+
+  for (const [nameKey, groupedBySourceId] of byNameKey.entries()) {
+    const identities = [...groupedBySourceId.values()];
+    if (identities.length <= 1) {
+      continue;
+    }
+
+    const dobValues = [
+      ...new Set(
+        identities.flatMap((row) => [...row.dobIsoValues]).filter(Boolean),
+      ),
+    ];
+    const countryValues = [
+      ...new Set(
+        identities.flatMap((row) => [...row.countries]).filter(Boolean),
+      ),
+    ];
+    const genderValues = [
+      ...new Set(
+        identities.flatMap((row) => [...row.genders]).filter(Boolean),
+      ),
+    ];
+
+    const dobYears = [...new Set(dobValues.map((value) => extractBirthYear(value)).filter(Number.isFinite))] as number[];
+    const nearDobMergeEligible =
+      identities.length === 2 &&
+      dobValues.length === 2 &&
+      dobYears.length === 2 &&
+      countryValues.length <= 1 &&
+      genderValues.length <= 1 &&
+      Math.abs(dobYears[0] - dobYears[1]) <= 3;
+    const canMergeByExactDob = dobValues.length === 1;
+    const canMerge = canMergeByExactDob || nearDobMergeEligible;
+
+    if (!canMerge) {
+      const dedupeKey = `wtt:${nameKey}:dob:${dobValues.sort().join("|")}`;
+      if (!issueDedupe.has(dedupeKey)) {
+        issueDedupe.add(dedupeKey);
+        issues.push({
+          leftCanonicalKey: `wtt:${identities[0]?.sourceId ?? "unknown"}`,
+          rightCanonicalKey: `wtt:${identities[1]?.sourceId ?? identities[0]?.sourceId ?? "unknown"}`,
+          leftName: identities[0]?.displayName ?? nameKey,
+          rightName: identities[1]?.displayName ?? identities[0]?.displayName ?? nameKey,
+          reason: `WTT internal split unresolved for name key (${nameKey}): DOB mismatch or missing DOB across IDs.`,
+        });
+      }
+      continue;
+    }
+
+    if (countryValues.length > 1 || genderValues.length > 1) {
+      const dedupeKey = `wtt:${nameKey}:profile-conflict`;
+      if (!issueDedupe.has(dedupeKey)) {
+        issueDedupe.add(dedupeKey);
+        issues.push({
+          leftCanonicalKey: `wtt:${identities[0]?.sourceId ?? "unknown"}`,
+          rightCanonicalKey: `wtt:${identities[1]?.sourceId ?? identities[0]?.sourceId ?? "unknown"}`,
+          leftName: identities[0]?.displayName ?? nameKey,
+          rightName: identities[1]?.displayName ?? identities[0]?.displayName ?? nameKey,
+          reason: `WTT internal split unresolved for name key (${nameKey}): conflicting country/gender across IDs.`,
+        });
+      }
+      continue;
+    }
+
+    const canonicalHint = canMergeByExactDob
+      ? `wtt-profile:${nameKey}:dob:${dobValues[0]}`
+      : `wtt-profile:${nameKey}:country:${countryValues[0] ?? "unk"}:near-dob`;
+    let groupChanged = false;
+    for (const row of sourcePlayers) {
+      if (row.source !== "wtt") {
+        continue;
+      }
+      if (!groupedBySourceId.has(row.sourceId)) {
+        continue;
+      }
+      if (row.canonicalHint !== canonicalHint) {
+        row.canonicalHint = canonicalHint;
+        reassignedRows += 1;
+        groupChanged = true;
+      }
+    }
+    if (groupChanged) {
+      mergedGroups += 1;
+    }
+  }
+
+  emit(
+    log,
+    `Auto-consolidated WTT identity hints: groups=${mergedGroups}, rowReassignments=${reassignedRows}.`,
+  );
+  if (issues.length > 0) {
+    emit(log, `WTT internal split issues (unresolved): ${issues.length}.`);
+  }
+
+  return issues;
+}
+
 function autoLinkWTTToTTBL(
   sourcePlayers: SourcePlayerInput[],
   log?: RegistryLogFn,
 ): PlayerMergeCandidate[] {
   type TTBLCandidate = {
-    stableKey: string;
+    identityKey: string;
     displayName: string;
     countries: Set<string>;
     dobIsoValues: Set<string>;
@@ -737,10 +984,14 @@ function autoLinkWTTToTTBL(
       continue;
     }
 
-    if (player.source === "ttbl" && player.canonicalHint?.startsWith("ttbl-stable:")) {
+    if (
+      player.source === "ttbl" &&
+      (player.canonicalHint?.startsWith("ttbl-stable:") ||
+        player.canonicalHint?.startsWith("ttbl-profile:"))
+    ) {
       const byStable = ttblByNameKey.get(nameKey) ?? new Map<string, TTBLCandidate>();
       const existing = byStable.get(player.canonicalHint) ?? {
-        stableKey: player.canonicalHint,
+        identityKey: player.canonicalHint,
         displayName: player.displayName,
         countries: new Set<string>(),
         dobIsoValues: new Set<string>(),
@@ -777,7 +1028,7 @@ function autoLinkWTTToTTBL(
       continue;
     }
 
-    const ttblStableCount = new Set(ttblRows.map((row) => row.stableKey)).size;
+    const ttblStableCount = new Set(ttblRows.map((row) => row.identityKey)).size;
     const wttRowsBySourceId = new Map<string, SourcePlayerInput[]>();
     for (const row of wttRows) {
       const rows = wttRowsBySourceId.get(row.sourceId) ?? [];
@@ -813,10 +1064,9 @@ function autoLinkWTTToTTBL(
           Boolean(wtt.dobIso) &&
           ttbl.dobIsoValues.size > 0 &&
           !ttbl.dobIsoValues.has(wtt.dobIso ?? "");
+        const oneToOne = wttSourceCount === 1 && ttblStableCount === 1;
+        const closeBirthYear = hasCloseBirthYearMatch(wtt.dobIso, ttbl.dobIsoValues);
 
-        if (dobConflict) {
-          return false;
-        }
         if (!genderCompatible) {
           return false;
         }
@@ -825,14 +1075,22 @@ function autoLinkWTTToTTBL(
           return true;
         }
 
+        if (dobConflict) {
+          return countryCompatible && oneToOne && closeBirthYear;
+        }
+
         if (!wtt.dobIso || ttbl.dobIsoValues.size === 0) {
-          return countryCompatible && wttSourceCount === 1 && ttblStableCount === 1;
+          return countryCompatible && oneToOne;
+        }
+
+        if (countryCompatible && oneToOne && closeBirthYear) {
+          return true;
         }
 
         return false;
       });
 
-      const stableKeys = [...new Set(compatible.map((row) => row.stableKey))];
+      const stableKeys = [...new Set(compatible.map((row) => row.identityKey))];
       if (stableKeys.length === 1) {
         const target = stableKeys[0];
         for (const row of rowsForSourceId) {
@@ -860,7 +1118,7 @@ function autoLinkWTTToTTBL(
             rightCanonicalKey: stableKeys[0] ?? "ttbl:ambiguous",
             leftName,
             rightName: rightName || "TTBL stable candidates",
-            reason: `Auto-link ambiguity: ${stableKeys.length} TTBL stable matches for name key (${nameKey}).`,
+            reason: `Auto-link ambiguity: ${stableKeys.length} TTBL identity matches for name key (${nameKey}).`,
           });
         }
         continue;
@@ -896,7 +1154,7 @@ function autoLinkWTTToTTBL(
         issueDedupe.add(dedupeKey);
         issues.push({
           leftCanonicalKey: issueKeyBase,
-          rightCanonicalKey: ttblRows[0]?.stableKey ?? "ttbl:unknown",
+          rightCanonicalKey: ttblRows[0]?.identityKey ?? "ttbl:unknown",
           leftName: wtt.displayName,
           rightName: ttblRows[0]?.displayName ?? "TTBL candidate",
           reason: `Auto-link blocked for name key (${nameKey}): ${detail}.`,
@@ -914,18 +1172,29 @@ function autoLinkWTTToTTBL(
 }
 
 async function loadManualConfig(): Promise<PlayerRegistryManualConfig> {
-  if (!(await fileExists(PLAYERS_MANUAL_FILE))) {
-    await ensureDir(PLAYERS_OUTPUT_DIR);
-    await writeJson(PLAYERS_MANUAL_FILE, DEFAULT_MANUAL_CONFIG);
+  const prisma = getRegistryPrismaClient();
+  const prismaAny = prisma as unknown as {
+    playerManualAlias?: {
+      findMany: (args: unknown) => Promise<Array<{ key: string; canonicalKey: string }>>;
+    };
+  };
+  if (!prismaAny.playerManualAlias?.findMany) {
+    return DEFAULT_MANUAL_CONFIG;
+  }
+  const rows = await prismaAny.playerManualAlias.findMany({
+    select: {
+      key: true,
+      canonicalKey: true,
+    },
+  });
+
+  if (rows.length === 0) {
     return DEFAULT_MANUAL_CONFIG;
   }
 
-  return (
-    (await readJson<PlayerRegistryManualConfig>(
-      PLAYERS_MANUAL_FILE,
-      DEFAULT_MANUAL_CONFIG,
-    )) ?? DEFAULT_MANUAL_CONFIG
-  );
+  return {
+    aliases: Object.fromEntries(rows.map((row) => [row.key, row.canonicalKey])),
+  };
 }
 
 function givenNamesSimilar(left: string, right: string): boolean {
@@ -1069,6 +1338,37 @@ function buildMergeCandidates(players: CanonicalPlayer[]): PlayerMergeCandidate[
     .slice(0, 150);
 }
 
+function dedupeMergeCandidates(candidates: PlayerMergeCandidate[]): PlayerMergeCandidate[] {
+  const seen = new Set<string>();
+  const out: PlayerMergeCandidate[] = [];
+
+  for (const row of candidates) {
+    const leftKey = row.leftCanonicalKey.trim();
+    const rightKey = row.rightCanonicalKey.trim();
+    const reason = row.reason.trim().toLowerCase();
+    if (!leftKey || !rightKey || !reason) {
+      continue;
+    }
+
+    const pair = [leftKey, rightKey].sort((a, b) => a.localeCompare(b));
+    const signature = `${pair[0]}::${pair[1]}::${reason}`;
+    if (seen.has(signature)) {
+      continue;
+    }
+
+    seen.add(signature);
+    out.push({
+      leftCanonicalKey: leftKey,
+      rightCanonicalKey: rightKey,
+      leftName: row.leftName,
+      rightName: row.rightName,
+      reason: row.reason.trim(),
+    });
+  }
+
+  return out;
+}
+
 function toCanonicalArray(input: Map<string, MutableCanonical>): CanonicalPlayer[] {
   const out: CanonicalPlayer[] = [];
 
@@ -1098,18 +1398,18 @@ function toCanonicalArray(input: Map<string, MutableCanonical>): CanonicalPlayer
 
 export async function rebuildPlayerRegistry(log?: RegistryLogFn): Promise<PlayerRegistrySnapshot> {
   emit(log, "Starting player registry rebuild.");
-  await ensureDir(PLAYERS_OUTPUT_DIR);
 
   const manual = await loadManualConfig();
   emit(log, `Loaded manual aliases: ${Object.keys(manual.aliases ?? {}).length}`);
   const [ttblPlayers, wttPlayers] = await Promise.all([
     collectTTBLPlayers(log),
-    collectWTTPlayers(),
+    collectWTTPlayers(log),
   ]);
   emit(log, `Collected source players: TTBL=${ttblPlayers.length}, WTT=${wttPlayers.length}`);
 
   const sourcePlayers = [...ttblPlayers, ...wttPlayers];
   const ttblConsolidationIssues = autoConsolidateTTBLStableHints(sourcePlayers, log);
+  const wttConsolidationIssues = autoConsolidateWTTIdentityHints(sourcePlayers, log);
   const autoLinkIssues = autoLinkWTTToTTBL(sourcePlayers, log);
   const canonicalMap = new Map<string, MutableCanonical>();
   const sourceIndex: Record<string, string> = {};
@@ -1158,11 +1458,12 @@ export async function rebuildPlayerRegistry(log?: RegistryLogFn): Promise<Player
   }
 
   const canonicalPlayers = toCanonicalArray(canonicalMap);
-  const mergeCandidates = [
+  const mergeCandidates = dedupeMergeCandidates([
     ...buildMergeCandidates(canonicalPlayers),
     ...ttblConsolidationIssues,
+    ...wttConsolidationIssues,
     ...autoLinkIssues,
-  ].slice(0, 300);
+  ]).slice(0, 300);
   emit(
     log,
     `Built canonical map: canonical=${canonicalPlayers.length}, candidates=${mergeCandidates.length}`,
@@ -1183,19 +1484,160 @@ export async function rebuildPlayerRegistry(log?: RegistryLogFn): Promise<Player
     sourceIndex,
   };
 
-  await writeJson(PLAYERS_REGISTRY_FILE, snapshot);
-  emit(log, `Registry written to ${PLAYERS_REGISTRY_FILE}`);
+  const prisma = getRegistryPrismaClient();
+  if (!hasRegistryTables(prisma)) {
+    registryGlobal.__playerRegistrySnapshotCompat = snapshot;
+    emit(
+      log,
+      "Registry stored in compatibility memory cache (restart dev server after prisma generate).",
+    );
+    return snapshot;
+  }
+
+  await prisma.$transaction(async (tx) => {
+    await tx.playerMergeCandidate.deleteMany({});
+    await tx.playerCanonicalMember.deleteMany({});
+    await tx.playerCanonical.deleteMany({});
+    await tx.playerRegistryState.deleteMany({});
+
+    await tx.playerRegistryState.create({
+      data: {
+        id: 1,
+        generatedAt: new Date(snapshot.generatedAt),
+        sourcePlayers: snapshot.totals.sourcePlayers,
+        ttblSourcePlayers: snapshot.totals.ttblSourcePlayers,
+        wttSourcePlayers: snapshot.totals.wttSourcePlayers,
+        canonicalPlayers: snapshot.totals.canonicalPlayers,
+        mergedPlayers: snapshot.totals.mergedPlayers,
+        candidates: snapshot.totals.candidates,
+      },
+    });
+
+    if (snapshot.players.length > 0) {
+      await tx.playerCanonical.createMany({
+        data: snapshot.players.map((row) => ({
+          canonicalKey: row.canonicalKey,
+          displayName: row.displayName,
+          normalizedNames: row.normalizedNames,
+          sourceCount: row.sourceCount,
+          memberCount: row.memberCount,
+        })),
+      });
+    }
+
+    const members = snapshot.players.flatMap((player) =>
+      player.members.map((member) => ({
+        canonicalKey: player.canonicalKey,
+        source: member.source,
+        sourceId: member.sourceId,
+        sourceKey: member.sourceKey,
+        names: member.names,
+        seasons: member.seasons,
+      })),
+    );
+    for (let i = 0; i < members.length; i += 500) {
+      const batch = members.slice(i, i + 500);
+      if (batch.length > 0) {
+        await tx.playerCanonicalMember.createMany({ data: batch });
+      }
+    }
+
+    if (snapshot.mergeCandidates.length > 0) {
+      await tx.playerMergeCandidate.createMany({
+        data: snapshot.mergeCandidates.map((row) => ({
+          leftCanonicalKey: row.leftCanonicalKey,
+          rightCanonicalKey: row.rightCanonicalKey,
+          leftName: row.leftName,
+          rightName: row.rightName,
+          reason: row.reason,
+        })),
+      });
+    }
+  });
+  emit(log, "Registry persisted to relational tables.");
 
   return snapshot;
 }
 
 export async function getPlayerRegistrySnapshot(): Promise<PlayerRegistrySnapshot | null> {
-  return await readJson<PlayerRegistrySnapshot>(PLAYERS_REGISTRY_FILE, null);
-}
+  const prisma = getRegistryPrismaClient();
+  if (!hasRegistryTables(prisma)) {
+    return registryGlobal.__playerRegistrySnapshotCompat ?? null;
+  }
 
-export async function getManualMergeFilePath(): Promise<string> {
-  await loadManualConfig();
-  return PLAYERS_MANUAL_FILE;
+  const [state, canonicalRows, candidateRows] = await Promise.all([
+    prisma.playerRegistryState.findUnique({
+      where: { id: 1 },
+    }),
+    prisma.playerCanonical.findMany({
+      include: {
+        members: true,
+      },
+    }),
+    prisma.playerMergeCandidate.findMany({}),
+  ]);
+
+  if (!state) {
+    return null;
+  }
+
+  const players: CanonicalPlayer[] = canonicalRows
+    .map((row) => ({
+      canonicalKey: row.canonicalKey,
+      displayName: row.displayName,
+      normalizedNames: [...row.normalizedNames].sort((a, b) => a.localeCompare(b)),
+      sourceCount: row.sourceCount,
+      memberCount: row.memberCount,
+      members: row.members
+        .map((member) => ({
+          source: member.source as "ttbl" | "wtt",
+          sourceId: member.sourceId,
+          sourceKey: member.sourceKey,
+          names: [...member.names].sort((a, b) => a.localeCompare(b)),
+          seasons: [...member.seasons].sort((a, b) => a.localeCompare(b)),
+        }))
+        .sort((a, b) => a.sourceKey.localeCompare(b.sourceKey)),
+    }))
+    .sort(
+      (a, b) => b.memberCount - a.memberCount || a.displayName.localeCompare(b.displayName),
+    );
+
+  const mergeCandidates: PlayerMergeCandidate[] = candidateRows
+    .map((row) => ({
+      leftCanonicalKey: row.leftCanonicalKey,
+      rightCanonicalKey: row.rightCanonicalKey,
+      leftName: row.leftName,
+      rightName: row.rightName,
+      reason: row.reason,
+    }))
+    .sort(
+      (a, b) =>
+        a.reason.localeCompare(b.reason) ||
+        a.leftName.localeCompare(b.leftName) ||
+        a.rightName.localeCompare(b.rightName),
+    );
+
+  const sourceIndex: Record<string, string> = {};
+  for (const player of players) {
+    for (const member of player.members) {
+      sourceIndex[member.sourceKey] = player.canonicalKey;
+    }
+  }
+
+  return {
+    generatedAt: state.generatedAt.toISOString(),
+    totals: {
+      sourcePlayers: state.sourcePlayers,
+      ttblSourcePlayers: state.ttblSourcePlayers,
+      wttSourcePlayers: state.wttSourcePlayers,
+      canonicalPlayers: state.canonicalPlayers,
+      mergedPlayers: state.mergedPlayers,
+      candidates: state.candidates,
+    },
+    players,
+    mergeCandidates,
+    sourceIndex,
+  };
 }
 
 export async function ensurePlayerRegistry(): Promise<PlayerRegistrySnapshot | null> {

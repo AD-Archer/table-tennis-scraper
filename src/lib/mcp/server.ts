@@ -1,19 +1,15 @@
-import path from "node:path";
-import { promises as fs } from "node:fs";
-import { assertDataPath, fileExists, readJson } from "@/lib/fs";
+import { getPrismaClient } from "@/lib/db/prisma";
 import {
   getPlayerFieldMappingContract,
   normalizeCanonicalField,
 } from "@/lib/normalization/field-mapping";
-import {
-  TTBL_SEASONS_DIR,
-  WTT_OUTPUT_DIR,
-  getTTBLReadDir,
-} from "@/lib/paths";
 import { getDashboardOverview } from "@/lib/overview";
 import {
   ActionJobStatus,
   ActionJobType,
+  cancelActionJob,
+  cancelActiveActionJobs,
+  cancelScheduledFollowups,
   getActionJob,
   getLatestActionJob,
   startActionJob,
@@ -23,7 +19,6 @@ import {
   getLatestCleanScrapeJob,
   startCleanScrapeJob,
 } from "@/lib/scrapers/clean-job";
-import { TTBLMatchSummary, TTBLMetadata, WTTMatch } from "@/lib/types";
 import { isWTTGenderedSinglesEvent } from "@/lib/wtt/events";
 
 type JsonObject = Record<string, unknown>;
@@ -91,6 +86,24 @@ const MAX_MATCH_LIMIT = 1000;
 const DEFAULT_MATCH_LIMIT = 100;
 const MAX_PLACE_LIMIT = 500;
 const DEFAULT_PLACE_LIMIT = 100;
+const ACTION_JOB_TYPES: ActionJobType[] = [
+  "ttbl",
+  "ttbl-legacy",
+  "ttbl-all-time",
+  "wtt",
+  "wtt-all-time",
+  "players-registry",
+  "destroy-data",
+];
+
+function parseActionJobType(value: unknown): ActionJobType | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const normalized = value.trim() as ActionJobType;
+  return ACTION_JOB_TYPES.includes(normalized) ? normalized : null;
+}
 
 function parseSeasonStart(value: string | null | undefined): number {
   const match = value?.match(/^(\d{4})\s*[-/]\s*(\d{4})$/);
@@ -269,43 +282,9 @@ function summarizeActionStatus(
   return summary;
 }
 
-async function listTTBLSeasonEntries(): Promise<Array<{ season: string; dir: string }>> {
-  const entries = new Map<string, string>();
-
-  if (await fileExists(TTBL_SEASONS_DIR)) {
-    assertDataPath(TTBL_SEASONS_DIR);
-    const rows = await fs.readdir(TTBL_SEASONS_DIR, { withFileTypes: true });
-    for (const row of rows) {
-      if (!row.isDirectory()) {
-        continue;
-      }
-
-      const seasonDir = path.join(TTBL_SEASONS_DIR, row.name);
-      const metadata = await readJson<TTBLMetadata>(
-        path.join(seasonDir, "metadata.json"),
-        null,
-      );
-      const season = metadata?.season ?? row.name;
-      if (parseSeasonStart(season) > 0) {
-        entries.set(season, seasonDir);
-      }
-    }
-  }
-
-  const readDir = getTTBLReadDir();
-  const readMeta = await readJson<TTBLMetadata>(path.join(readDir, "metadata.json"), null);
-  if (readMeta?.season && parseSeasonStart(readMeta.season) > 0) {
-    entries.set(readMeta.season, readDir);
-  }
-
-  return [...entries.entries()]
-    .map(([season, dir]) => ({ season, dir }))
-    .sort((a, b) => parseSeasonStart(b.season) - parseSeasonStart(a.season));
-}
-
-function scoreFromWTTMatch(match: WTTMatch): string | null {
-  const aSets = match.final_sets?.a;
-  const xSets = match.final_sets?.x;
+function scoreFromWTTMatch(match: { finalSetsA: number; finalSetsX: number }): string | null {
+  const aSets = match.finalSetsA;
+  const xSets = match.finalSetsX;
   if (!Number.isFinite(aSets) || !Number.isFinite(xSets)) {
     return null;
   }
@@ -315,93 +294,128 @@ function scoreFromWTTMatch(match: WTTMatch): string | null {
 async function buildDatasetSnapshot(): Promise<DatasetSnapshot> {
   const now = new Date();
   const matches: DiagnosticMatch[] = [];
+  const prisma = getPrismaClient();
+  if (!prisma) {
+    return {
+      generatedAt: new Date().toISOString(),
+      matches: [],
+      places: [],
+      latestTTBLSeasonStart: 0,
+      latestWTTYear: 0,
+    };
+  }
 
-  const ttblEntries = await listTTBLSeasonEntries();
-  const latestTTBLSeasonStart = ttblEntries.reduce(
+  const [ttblRows, wttRows] = await Promise.all([
+    prisma.ttblMatch.findMany({
+      where: { isYouth: false },
+      select: {
+        id: true,
+        season: true,
+        timestampMs: true,
+        matchState: true,
+        gameday: true,
+        venue: true,
+        homeTeamName: true,
+        awayTeamName: true,
+        homeGameWins: true,
+        awayGameWins: true,
+      },
+    }),
+    prisma.wttMatch.findMany({
+      where: { isYouth: false },
+      select: {
+        id: true,
+        year: true,
+        lastUpdatedAt: true,
+        resultStatus: true,
+        notFinished: true,
+        ongoing: true,
+        tournament: true,
+        event: true,
+        stage: true,
+        round: true,
+        playerAId: true,
+        playerAName: true,
+        playerXId: true,
+        playerXName: true,
+        finalSetsA: true,
+        finalSetsX: true,
+      },
+    }),
+  ]);
+
+  const latestTTBLSeasonStart = ttblRows.reduce(
     (max, row) => Math.max(max, parseSeasonStart(row.season)),
     0,
   );
 
-  for (const entry of ttblEntries) {
-    const summaries =
-      (await readJson<TTBLMatchSummary[]>(
-        path.join(entry.dir, "matches_summary.json"),
-        [],
-      )) ?? [];
-    const seasonStart = parseSeasonStart(entry.season);
+  for (const row of ttblRows) {
+    const seasonStart = parseSeasonStart(row.season);
     const legacy = latestTTBLSeasonStart > 0 && seasonStart < latestTTBLSeasonStart;
+    const occurredAt = toIsoFromUnixSeconds(Number(row.timestampMs));
+    const state = row.matchState ?? null;
+    const normalizedState = (state ?? "").toLowerCase().replace(/\s+/g, "");
+    const preMatch = /(inactive|scheduled|upcoming|pending|notstarted|startlist|draw)/.test(
+      normalizedState,
+    );
+    const ongoing = /(live|running|ongoing|inprogress|active)/.test(normalizedState);
+    const notFinished = normalizedState !== "finished" && !preMatch;
 
-    for (const row of summaries) {
-      const state = row.matchState ?? null;
-      const normalizedState = (state ?? "").toLowerCase();
-      const ongoing = /(live|running|ongoing|progress|active)/.test(normalizedState);
-      const notFinished = normalizedState !== "finished";
-      const occurredAt = toIsoFromUnixSeconds(row.timestamp);
-      const today = isSameUtcDay(occurredAt, now);
-
-      const home = row.homeTeam?.name ?? null;
-      const away = row.awayTeam?.name ?? null;
-      const score =
-        Number.isFinite(row.homeTeam?.gameWins) && Number.isFinite(row.awayTeam?.gameWins)
-          ? `${row.homeTeam.gameWins}-${row.awayTeam.gameWins}`
-          : null;
-
-      matches.push({
-        source: "ttbl",
-        matchId: row.matchId,
-        seasonOrYear: entry.season,
-        occurredAt,
-        state,
-        notFinished,
-        ongoing,
-        today,
-        legacy,
-        place: row.venue ?? null,
-        event: row.gameday ?? null,
-        homeOrPlayerA: home,
-        awayOrPlayerX: away,
-        score,
-      });
-    }
+    matches.push({
+      source: "ttbl",
+      matchId: row.id,
+      seasonOrYear: row.season,
+      occurredAt,
+      state,
+      notFinished,
+      ongoing,
+      today: isSameUtcDay(occurredAt, now),
+      legacy,
+      place: row.venue ?? null,
+      event: row.gameday ?? null,
+      homeOrPlayerA: row.homeTeamName ?? null,
+      awayOrPlayerX: row.awayTeamName ?? null,
+      score:
+        Number.isFinite(row.homeGameWins) && Number.isFinite(row.awayGameWins)
+          ? `${row.homeGameWins}-${row.awayGameWins}`
+          : null,
+    });
   }
 
-  const wttMatches =
-    (await readJson<WTTMatch[]>(path.join(WTT_OUTPUT_DIR, "matches.json"), [])) ?? [];
-  const latestWTTYear = wttMatches.reduce((max, row) => {
+  const latestWTTYear = wttRows.reduce((max, row) => {
     if (!isWTTGenderedSinglesEvent(row.event)) {
       return max;
     }
-
-    const year = Number.parseInt(row.year ?? "", 10);
-    return Number.isFinite(year) ? Math.max(max, year) : max;
+    return Number.isFinite(row.year) ? Math.max(max, row.year as number) : max;
   }, 0);
 
-  for (const row of wttMatches) {
+  for (const row of wttRows) {
     if (!isWTTGenderedSinglesEvent(row.event)) {
       continue;
     }
 
-    const year = row.year?.trim() || null;
+    const year = Number.isFinite(row.year) ? String(row.year) : null;
     const parsedYear = Number.parseInt(year ?? "", 10);
     const legacy =
       Number.isFinite(parsedYear) && latestWTTYear > 0
         ? parsedYear < latestWTTYear
         : false;
+    const occurredAt = row.lastUpdatedAt?.toISOString() ?? toIsoFromYear(year);
 
     matches.push({
       source: "wtt",
-      matchId: row.match_id,
+      matchId: row.id,
       seasonOrYear: year,
-      occurredAt: toIsoFromYear(year),
-      state: "Finished",
-      notFinished: false,
-      ongoing: false,
-      today: false,
+      occurredAt,
+      state: row.resultStatus ?? (row.notFinished ? "In Progress" : "Finished"),
+      notFinished: Boolean(row.notFinished),
+      ongoing: Boolean(row.ongoing),
+      today: isSameUtcDay(occurredAt, now),
       legacy,
       place: row.tournament ?? null,
       event: row.event ?? row.stage ?? row.round ?? null,
-      homeOrPlayerA: row.players.a.name ?? row.players.a.ittf_id,
-      awayOrPlayerX: row.players.x.name ?? row.players.x.ittf_id,
+      homeOrPlayerA: row.playerAName ?? row.playerAId,
+      awayOrPlayerX: row.playerXName ?? row.playerXId,
       score: scoreFromWTTMatch(row),
     });
   }
@@ -604,6 +618,8 @@ async function toolStartWTTScrape(args: JsonObject): Promise<unknown> {
 
   const pageSize = Number.parseInt(String(args.pageSize ?? ""), 10);
   const maxPages = Number.parseInt(String(args.maxPages ?? ""), 10);
+  const maxEventsPerYear = Number.parseInt(String(args.maxEventsPerYear ?? ""), 10);
+  const recentDays = Number.parseInt(String(args.recentDays ?? ""), 10);
   const delayMs = Number.parseInt(String(args.delayMs ?? ""), 10);
   const tournamentScope =
     args.tournamentScope === "all" ? "all" : args.tournamentScope === "wtt_only" ? "wtt_only" : undefined;
@@ -623,6 +639,8 @@ async function toolStartWTTScrape(args: JsonObject): Promise<unknown> {
     years: resolvedYears,
     pageSize: Number.isFinite(pageSize) ? pageSize : undefined,
     maxPages: Number.isFinite(maxPages) ? maxPages : undefined,
+    maxEventsPerYear: Number.isFinite(maxEventsPerYear) ? maxEventsPerYear : undefined,
+    recentDays: Number.isFinite(recentDays) ? recentDays : undefined,
     delayMs: Number.isFinite(delayMs) ? delayMs : undefined,
     tournamentScope,
     eventScope,
@@ -659,6 +677,8 @@ async function toolStartWTTAllTimeScrape(args: JsonObject): Promise<unknown> {
     endYear: numberOrUndefined(args.endYear),
     pageSize: numberOrUndefined(args.pageSize),
     maxPages: numberOrUndefined(args.maxPages),
+    maxEventsPerYear: numberOrUndefined(args.maxEventsPerYear),
+    recentDays: numberOrUndefined(args.recentDays),
     delayMs: numberOrUndefined(args.delayMs),
     tournamentScope,
     eventScope,
@@ -673,6 +693,8 @@ async function toolStartWTTAllTimeScrape(args: JsonObject): Promise<unknown> {
       endYear: numberOrUndefined(args.endYear),
       pageSize: numberOrUndefined(args.pageSize),
       maxPages: numberOrUndefined(args.maxPages),
+      maxEventsPerYear: numberOrUndefined(args.maxEventsPerYear),
+      recentDays: numberOrUndefined(args.recentDays),
       delayMs: numberOrUndefined(args.delayMs),
       tournamentScope,
       eventScope,
@@ -766,6 +788,57 @@ async function toolGetScrapeStatus(args: JsonObject): Promise<unknown> {
   };
 }
 
+async function toolCancelScrapeJobs(args: JsonObject): Promise<unknown> {
+  const jobId = typeof args.jobId === "string" ? args.jobId.trim() : "";
+  const type = parseActionJobType(args.target);
+  const includeQueued = args.includeQueued !== false;
+  const clearFollowups = args.clearFollowups !== false;
+  const reason =
+    typeof args.reason === "string" && args.reason.trim().length > 0
+      ? args.reason.trim()
+      : "Cancelled from MCP.";
+
+  let cancelled:
+    | { cancelled: Array<{ jobId: string; type: ActionJobType; state: string }>; count: number }
+    | null = null;
+  let single: ReturnType<typeof cancelActionJob> | null = null;
+
+  if (jobId) {
+    single = cancelActionJob(jobId, reason);
+    cancelled = null;
+  } else {
+    cancelled = cancelActiveActionJobs({
+      type: type ?? undefined,
+      includeQueued,
+      reason,
+    });
+  }
+
+  let followups: ReturnType<typeof cancelScheduledFollowups> | null = null;
+  if (clearFollowups) {
+    const followupTarget =
+      type === "ttbl" || type === "ttbl-legacy" || type === "ttbl-all-time"
+        ? "ttbl"
+        : type === "wtt" || type === "wtt-all-time"
+          ? "wtt"
+          : "all";
+    followups = cancelScheduledFollowups(followupTarget);
+  }
+
+  return {
+    requested: {
+      jobId: jobId || null,
+      target: type ?? null,
+      includeQueued,
+      clearFollowups,
+      reason,
+    },
+    single,
+    cancelled,
+    followups,
+  };
+}
+
 async function toolListMatches(args: JsonObject, ctx: ToolContext): Promise<unknown> {
   const dataset = await getDatasetFromContext(ctx);
   const limit = clamp(
@@ -791,7 +864,7 @@ async function toolListMatches(args: JsonObject, ctx: ToolContext): Promise<unkn
     },
     notes: [
       "today/ongoing are reliable for TTBL timestamps and states.",
-      "WTT public match rows do not expose exact match dates, so today/ongoing are usually false.",
+      "WTT rows now persist result_status/ongoing/not_finished when available from source feeds.",
     ],
     matches: rows,
   };
@@ -1003,6 +1076,8 @@ const tools: Array<MCPToolDefinition & { handler: ToolHandler }> = [
         currentYear: { type: "boolean" },
         pageSize: { type: "integer", minimum: 1 },
         maxPages: { type: "integer", minimum: 1 },
+        maxEventsPerYear: { type: "integer", minimum: 1 },
+        recentDays: { type: "integer", minimum: 1 },
         delayMs: { type: "integer", minimum: 0 },
         tournamentScope: { type: "string", enum: ["wtt_only", "all"] },
         eventScope: { type: "string", enum: ["singles_only", "all"] },
@@ -1025,6 +1100,8 @@ const tools: Array<MCPToolDefinition & { handler: ToolHandler }> = [
         endYear: { type: "integer" },
         pageSize: { type: "integer", minimum: 1 },
         maxPages: { type: "integer", minimum: 1 },
+        maxEventsPerYear: { type: "integer", minimum: 1 },
+        recentDays: { type: "integer", minimum: 1 },
         delayMs: { type: "integer", minimum: 0 },
         tournamentScope: { type: "string", enum: ["wtt_only", "all"] },
         eventScope: { type: "string", enum: ["singles_only", "all"] },
@@ -1081,6 +1158,34 @@ const tools: Array<MCPToolDefinition & { handler: ToolHandler }> = [
       required: ["target"],
     },
     handler: async (args) => await toolGetScrapeStatus(args),
+  },
+  {
+    name: "cancel_scrape_jobs",
+    description:
+      "Cancel one job by jobId or cancel currently active jobs, with optional follow-up timer cancellation.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        jobId: { type: "string" },
+        target: {
+          type: "string",
+          enum: [
+            "ttbl",
+            "ttbl-legacy",
+            "ttbl-all-time",
+            "wtt",
+            "wtt-all-time",
+            "players-registry",
+            "destroy-data",
+          ],
+        },
+        includeQueued: { type: "boolean" },
+        clearFollowups: { type: "boolean" },
+        reason: { type: "string" },
+      },
+    },
+    handler: async (args) => await toolCancelScrapeJobs(args),
   },
   {
     name: "list_matches",

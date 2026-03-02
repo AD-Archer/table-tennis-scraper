@@ -34,6 +34,9 @@ interface ApiEnvelope {
 }
 
 const ACTION_JOB_POLL_MS = 1200;
+const OVERVIEW_POLL_MS = 10000;
+const FRONTEND_MASTER_PASSWORD =
+  process.env.NEXT_PUBLIC_MASTER_SYNC_PASSWORD?.trim() ?? "";
 
 function fmtDate(value?: string | null): string {
   if (!value) {
@@ -53,6 +56,23 @@ function fmtDate(value?: string | null): string {
     minute: "2-digit",
     second: "2-digit",
   }).format(date);
+}
+
+function formatSyncDetails(details: Record<string, unknown> | null | undefined): string {
+  if (!details || Object.keys(details).length === 0) {
+    return "";
+  }
+
+  return ` ${JSON.stringify(details)}`;
+}
+
+function isWaitingQueued(status: ActionJobStatus): boolean {
+  if (status.state !== "queued") {
+    return false;
+  }
+
+  const last = status.logs.at(-1) ?? "";
+  return /queued:\s*waiting for active job/i.test(last);
 }
 
 function parseTTBLSeasonsCsv(value: string): string[] {
@@ -122,8 +142,9 @@ export function Dashboard({ initialOverview }: DashboardProps) {
   const [wttYears, setWttYears] = useState(
     initialOverview.wtt.years.length > 0
       ? initialOverview.wtt.years.join(",")
-      : "2025,2024,2023",
+      : `${new Date().getUTCFullYear()},${new Date().getUTCFullYear() - 1}`,
   );
+  const [masterPassword, setMasterPassword] = useState("");
 
   const [showActionLog, setShowActionLog] = useState(false);
   const [actionLogTitle, setActionLogTitle] = useState("No action has been run yet.");
@@ -139,6 +160,15 @@ export function Dashboard({ initialOverview }: DashboardProps) {
   const mergeCandidates = useMemo(
     () => (overview.players?.mergeCandidates ?? []).slice(0, 16),
     [overview.players?.mergeCandidates],
+  );
+  const syncLogLines = useMemo(
+    () =>
+      (overview.sync.activity ?? []).map((entry) =>
+        `[${entry.timestamp}] [${entry.source.toUpperCase()}] [${entry.level.toUpperCase()}] ${entry.message}${formatSyncDetails(
+          entry.details,
+        )}`,
+      ),
+    [overview.sync.activity],
   );
   const ttblSeasons = useMemo(() => {
     const rows = new Set<string>(overview.ttbl.legacy?.seasons ?? []);
@@ -208,6 +238,16 @@ export function Dashboard({ initialOverview }: DashboardProps) {
     };
   }, [clearActionPollTimer]);
 
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      void refreshOverview().catch(() => undefined);
+    }, OVERVIEW_POLL_MS);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [refreshOverview]);
+
   const pollActionJob = useCallback(
     async (endpoint: string, jobId: string, key: string): Promise<void> => {
       try {
@@ -225,7 +265,23 @@ export function Dashboard({ initialOverview }: DashboardProps) {
         setActionLogs(payload.status.logs ?? []);
         setActionJobId(payload.status.jobId);
 
-        if (payload.status.state === "queued" || payload.status.state === "running") {
+        if (payload.status.state === "queued") {
+          const waiting = isWaitingQueued(payload.status);
+          if (waiting) {
+            setBusyKey((prev) => (prev === key ? null : prev));
+            setActivity(`${key} scheduled. It will run after the active job finishes.`);
+          } else {
+            setActivity(`${key} queued.`);
+          }
+          actionPollTimerRef.current = window.setTimeout(() => {
+            void pollActionJob(endpoint, jobId, key);
+          }, ACTION_JOB_POLL_MS);
+          return;
+        }
+
+        if (payload.status.state === "running") {
+          setBusyKey((prev) => prev ?? key);
+          setActivity(`${key} running...`);
           actionPollTimerRef.current = window.setTimeout(() => {
             void pollActionJob(endpoint, jobId, key);
           }, ACTION_JOB_POLL_MS);
@@ -302,6 +358,11 @@ export function Dashboard({ initialOverview }: DashboardProps) {
         setActivity(`${key} job ${payload.jobId} started.`);
       }
 
+      if (payload.status.state === "queued" && isWaitingQueued(payload.status)) {
+        setBusyKey(null);
+        setActivity(`${key} scheduled. It will run after the active job finishes.`);
+      }
+
       if (payload.status.state === "completed" || payload.status.state === "failed") {
         setBusyKey(null);
         if (payload.status.state === "completed") {
@@ -361,7 +422,9 @@ export function Dashboard({ initialOverview }: DashboardProps) {
       {
         years: wttYears,
         pageSize: 50,
-        maxPages: 180,
+        maxPages: 80,
+        maxEventsPerYear: 18,
+        recentDays: 45,
         delayMs: 180,
         tournamentScope: "wtt_only",
         eventScope: "singles_only",
@@ -387,10 +450,40 @@ export function Dashboard({ initialOverview }: DashboardProps) {
   }
 
   async function onDestroyData() {
+    const enteredMasterPassword = masterPassword.trim();
+    if (!enteredMasterPassword) {
+      setActivity("Destroy data failed: enter master password.");
+      return;
+    }
+    if (!FRONTEND_MASTER_PASSWORD) {
+      setActivity(
+        "Destroy data failed: NEXT_PUBLIC_MASTER_SYNC_PASSWORD is not configured.",
+      );
+      return;
+    }
+    if (enteredMasterPassword !== FRONTEND_MASTER_PASSWORD) {
+      setActivity("Destroy data failed: invalid master password.");
+      return;
+    }
     await invoke("/api/data/destroy", {}, "Destroy data");
   }
 
   async function onRunMasterSync() {
+    const enteredMasterPassword = masterPassword.trim();
+    if (!enteredMasterPassword) {
+      setActivity("Master sync failed: enter master password.");
+      return;
+    }
+    if (!FRONTEND_MASTER_PASSWORD) {
+      setActivity(
+        "Master sync failed: NEXT_PUBLIC_MASTER_SYNC_PASSWORD is not configured.",
+      );
+      return;
+    }
+    if (enteredMasterPassword !== FRONTEND_MASTER_PASSWORD) {
+      setActivity("Master sync failed: invalid master password.");
+      return;
+    }
     const nowYear = new Date().getUTCFullYear();
     await invoke(
       "/api/scrape/clean",
@@ -451,6 +544,22 @@ export function Dashboard({ initialOverview }: DashboardProps) {
             Activity
             <strong>{activity}</strong>
           </p>
+          <p>
+            TTBL Background
+            <strong>
+              {overview.sync.ttblFollowup.scheduled
+                ? `scheduled ${fmtDate(overview.sync.ttblFollowup.scheduledFor)}`
+                : "idle"}
+            </strong>
+          </p>
+          <p>
+            WTT Background
+            <strong>
+              {overview.sync.wttFollowup.scheduled
+                ? `scheduled ${fmtDate(overview.sync.wttFollowup.scheduledFor)}`
+                : "idle"}
+            </strong>
+          </p>
         </div>
       </section>
 
@@ -502,6 +611,9 @@ export function Dashboard({ initialOverview }: DashboardProps) {
             You can enter <code>2025</code> (auto-maps to <code>2025-2026</code>) or
             <code>2025-2026</code>. Max gamedays are auto-detected per season.
           </p>
+          <p className="hint">
+            Youth-tagged TTBL matches are filtered out by default.
+          </p>
           <button disabled={busyKey !== null} type="submit">
             {busyKey === "TTBL scrape" ? "Running..." : "Scrape TTBL"}
           </button>
@@ -514,9 +626,13 @@ export function Dashboard({ initialOverview }: DashboardProps) {
             <input value={wttYears} onChange={(e) => setWttYears(e.target.value)} />
           </label>
           <p className="hint">
-            Uses public Fabrik list API (<code>listid=31</code>) with default filters:
+            Uses TTU/WTT result feeds with default filters:
             WTT tournaments + singles-only + no youth. Writes
             <code>players.json</code>, <code>matches.json</code>, and <code>dataset.json</code>.
+          </p>
+          <p className="hint">
+            Default scope is intentionally limited for speed: current year, last 45 days, and
+            max 18 events per year.
           </p>
           <button disabled={busyKey !== null} type="submit">
             {busyKey === "WTT scrape" ? "Running..." : "Scrape WTT"}
@@ -559,9 +675,18 @@ export function Dashboard({ initialOverview }: DashboardProps) {
 
         <div className="panel action-panel">
           <h2>Master Sync</h2>
+          <label>
+            Master Password
+            <input
+              type="password"
+              value={masterPassword}
+              onChange={(e) => setMasterPassword(e.target.value)}
+              placeholder="Matches .env NEXT_PUBLIC_MASTER_SYNC_PASSWORD"
+            />
+          </label>
           <p className="hint">
             Discover all available TTBL seasons + WTT years, then run a full scrape into a
-            fresh local dataset.
+            fresh dataset.
           </p>
           <p className="hint">
             Uses full-history ranges and ignores the TTBL/WTT text-box values above.
@@ -577,7 +702,10 @@ export function Dashboard({ initialOverview }: DashboardProps) {
 
         <div className="panel action-panel">
           <h2>Data Controls</h2>
-          <p className="hint">Hard reset local test data under <code>web/data</code>.</p>
+          <p className="hint">Hard reset all stored relational dataset rows.</p>
+          <p className="hint">
+            Uses the same master password field as Master Sync.
+          </p>
           <button
             className="danger-button"
             disabled={busyKey !== null}
@@ -629,6 +757,20 @@ export function Dashboard({ initialOverview }: DashboardProps) {
             </pre>
           </div>
         ) : null}
+
+        <p className="hint" style={{ marginTop: "1rem" }}>
+          <strong>Persistent background sync log (saved to Postgres)</strong>
+        </p>
+        <p className="hint">
+          Includes scheduled time, run time, and what each background sync is checking.
+        </p>
+        <div className="scrape-log-wrap">
+          <pre className="scrape-log">
+            {(syncLogLines.length > 0
+              ? syncLogLines
+              : ["No background sync events recorded yet."]).join("\n")}
+          </pre>
+        </div>
       </section>
 
       <section className="data-grid">
@@ -721,21 +863,6 @@ export function Dashboard({ initialOverview }: DashboardProps) {
         </div>
       </section>
 
-      <section className="panel">
-        <h2>Data Locations</h2>
-        <div className="file-grid">
-          {overview.fileLocations.map((location) => (
-            <article
-              className="file-card"
-              key={`${location.label}:${location.path}`}
-            >
-              <span>{location.label}</span>
-              <code>{location.path}</code>
-              <strong>{location.exists ? "available" : "missing"}</strong>
-            </article>
-          ))}
-        </div>
-      </section>
     </main>
   );
 }

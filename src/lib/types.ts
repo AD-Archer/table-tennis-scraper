@@ -9,6 +9,7 @@ export interface TTBLGameRecord {
   timestamp: number;
   gameIndex: number;
   format?: "singles" | "doubles";
+  isYouth?: boolean;
   gameState: string;
   winnerSide: "Home" | "Away" | null;
   homePlayer: TTBLPlayerRef;
@@ -30,6 +31,7 @@ export interface TTBLMatchSummary {
   matchState: string;
   gameday: string;
   timestamp: number;
+  isYouth?: boolean;
   homeTeam: {
     id: string;
     name: string;
@@ -53,6 +55,10 @@ export interface TTBLMetadata {
   season: string;
   totalMatches: number;
   totalGamedays: number;
+  youthFilteredMatches?: number;
+  youthIncludedMatches?: number;
+  notFinishedMatches?: number;
+  ongoingMatches?: number;
   uniquePlayers: number;
   playersWithStats: number;
   totalGamesProcessed: number;
@@ -88,11 +94,19 @@ export interface WTTPlayer {
 
 export interface WTTMatch {
   match_id: string;
+  source_match_id?: string | null;
+  event_id?: string | null;
+  sub_event_code?: string | null;
   year: string | null;
+  last_updated_at?: string | null;
   tournament: string | null;
   event: string | null;
   stage: string | null;
   round: string | null;
+  result_status?: string | null;
+  not_finished?: boolean;
+  ongoing?: boolean;
+  is_youth?: boolean;
   walkover: boolean;
   winner_raw: number | null;
   winner_inferred: "A" | "X" | null;

@@ -1,6 +1,4 @@
-import path from "node:path";
-import { readJson, writeJson } from "@/lib/fs";
-import { WTT_OUTPUT_DIR } from "@/lib/paths";
+import { getPrismaClient } from "@/lib/db/prisma";
 import { ensurePlayerRegistry } from "@/lib/players/registry";
 import { getPlayerSlugOverview } from "@/lib/players/slugs";
 import { getTTBLPlayerProfile, readTTBLPlayerProfiles } from "@/lib/ttbl/player-profiles";
@@ -75,6 +73,119 @@ function createEmptyWTTPlayer(ittfId: string): WTTPlayer {
   };
 }
 
+function fromWTTPlayerRow(row: {
+  id: string;
+  firstName: string | null;
+  lastName: string | null;
+  fullName: string | null;
+  dob: string | null;
+  nationality: string | null;
+  team: string | null;
+  countryName: string | null;
+  organizationName: string | null;
+  gender: string | null;
+  age: number | null;
+  handedness: string | null;
+  style: string | null;
+  worldRanking: number | null;
+  worldRankingPoints: number | null;
+  headshotUrl: string | null;
+  matchesPlayed: number;
+  wins: number;
+  losses: number;
+  sources: string[];
+  lastSeenAt: Date | null;
+}): WTTPlayer {
+  const gender =
+    row.gender === "M" || row.gender === "W" || row.gender === "mixed" || row.gender === "unknown"
+      ? row.gender
+      : null;
+  return {
+    ittf_id: row.id,
+    first_name: row.firstName,
+    last_name: row.lastName,
+    full_name: row.fullName,
+    dob: row.dob,
+    nationality: row.nationality,
+    team: row.team,
+    country_name: row.countryName,
+    organization_name: row.organizationName,
+    gender,
+    age: row.age,
+    handedness: row.handedness,
+    style: row.style,
+    world_ranking: row.worldRanking,
+    world_ranking_points: row.worldRankingPoints,
+    headshot_url: row.headshotUrl,
+    stats: {
+      matches_played: row.matchesPlayed,
+      wins: row.wins,
+      losses: row.losses,
+    },
+    sources: row.sources,
+    last_seen: row.lastSeenAt?.toISOString() ?? new Date().toISOString(),
+  };
+}
+
+async function upsertWTTProfiles(profiles: Record<string, WTTPlayer>): Promise<void> {
+  const prisma = getPrismaClient();
+  if (!prisma) {
+    throw new Error("DATABASE_URL is required for WTT player persistence.");
+  }
+
+  const rows = Object.values(profiles);
+  for (const row of rows) {
+    await prisma.wttPlayer.upsert({
+      where: { id: row.ittf_id },
+      create: {
+        id: row.ittf_id,
+        firstName: row.first_name,
+        lastName: row.last_name,
+        fullName: row.full_name,
+        dob: row.dob,
+        nationality: row.nationality,
+        team: row.team,
+        countryName: row.country_name,
+        organizationName: row.organization_name,
+        gender: row.gender,
+        age: row.age,
+        handedness: row.handedness,
+        style: row.style,
+        worldRanking: row.world_ranking,
+        worldRankingPoints: row.world_ranking_points,
+        headshotUrl: row.headshot_url,
+        matchesPlayed: row.stats.matches_played,
+        wins: row.stats.wins,
+        losses: row.stats.losses,
+        sources: [...new Set(row.sources)],
+        lastSeenAt: row.last_seen ? new Date(row.last_seen) : null,
+      },
+      update: {
+        firstName: row.first_name,
+        lastName: row.last_name,
+        fullName: row.full_name,
+        dob: row.dob,
+        nationality: row.nationality,
+        team: row.team,
+        countryName: row.country_name,
+        organizationName: row.organization_name,
+        gender: row.gender,
+        age: row.age,
+        handedness: row.handedness,
+        style: row.style,
+        worldRanking: row.world_ranking,
+        worldRankingPoints: row.world_ranking_points,
+        headshotUrl: row.headshot_url,
+        matchesPlayed: row.stats.matches_played,
+        wins: row.stats.wins,
+        losses: row.stats.losses,
+        sources: [...new Set(row.sources)],
+        lastSeenAt: row.last_seen ? new Date(row.last_seen) : null,
+      },
+    });
+  }
+}
+
 function wttProfileNeedsHydration(profile: WTTPlayer | null): boolean {
   if (!profile) {
     return true;
@@ -101,10 +212,15 @@ export async function getPlayerDetailBySlug(slug: string): Promise<PlayerDetailV
     return null;
   }
 
-  const [overview, registry, wttPlayers, ttblProfiles] = await Promise.all([
+  const prisma = getPrismaClient();
+  if (!prisma) {
+    throw new Error("DATABASE_URL is required in Postgres mode.");
+  }
+
+  const [overview, registry, wttPlayerRows, ttblProfiles] = await Promise.all([
     getPlayerSlugOverview(Number.MAX_SAFE_INTEGER),
     ensurePlayerRegistry(),
-    readJson<Record<string, WTTPlayer>>(path.join(WTT_OUTPUT_DIR, "players.json"), {}),
+    prisma.wttPlayer.findMany(),
     readTTBLPlayerProfiles(),
   ]);
 
@@ -142,7 +258,9 @@ export async function getPlayerDetailBySlug(slug: string): Promise<PlayerDetailV
   }
 
   const members: PlayerSourceMemberDetail[] = [];
-  const wttById = wttPlayers ?? {};
+  const wttById = Object.fromEntries(
+    wttPlayerRows.map((row) => [row.id, fromWTTPlayerRow(row)]),
+  );
   const ttblById = { ...ttblProfiles };
   let wttProfilesChanged = false;
 
@@ -193,7 +311,7 @@ export async function getPlayerDetailBySlug(slug: string): Promise<PlayerDetailV
   }
 
   if (wttProfilesChanged) {
-    await writeJson(path.join(WTT_OUTPUT_DIR, "players.json"), wttById);
+    await upsertWTTProfiles(wttById);
   }
 
   return {
