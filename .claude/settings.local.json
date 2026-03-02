@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl:*)",
+      "Bash(echo === WTT Website API - GetLiveResult ===:*)",
+      "Bash(node:*)"
+    ]
+  }
+}
