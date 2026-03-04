@@ -13,9 +13,7 @@ export async function POST(request: Request) {
       pageSize?: number;
       maxPages?: number;
       maxEventsPerYear?: number;
-      recentDays?: number;
       delayMs?: number;
-      tournamentScope?: "wtt_only" | "all";
       eventScope?: "singles_only" | "all";
       includeYouth?: boolean;
       profileEnrichMaxPlayers?: number;
@@ -28,11 +26,9 @@ export async function POST(request: Request) {
       pageSize: body.pageSize,
       maxPages: body.maxPages,
       maxEventsPerYear: body.maxEventsPerYear,
-      recentDays: body.recentDays,
       delayMs: body.delayMs,
-      tournamentScope: body.tournamentScope ?? "all",
       eventScope: body.eventScope ?? "singles_only",
-      includeYouth: body.includeYouth ?? false,
+      includeYouth: body.includeYouth ?? true,
       profileEnrichMaxPlayers: body.profileEnrichMaxPlayers ?? 0,
       profileEnrichMinMatches: body.profileEnrichMinMatches ?? 3,
     });

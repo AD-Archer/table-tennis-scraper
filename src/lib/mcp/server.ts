@@ -655,10 +655,7 @@ async function toolStartWTTScrape(args: JsonObject): Promise<unknown> {
   const pageSize = Number.parseInt(String(args.pageSize ?? ""), 10);
   const maxPages = Number.parseInt(String(args.maxPages ?? ""), 10);
   const maxEventsPerYear = Number.parseInt(String(args.maxEventsPerYear ?? ""), 10);
-  const recentDays = Number.parseInt(String(args.recentDays ?? ""), 10);
   const delayMs = Number.parseInt(String(args.delayMs ?? ""), 10);
-  const tournamentScope =
-    args.tournamentScope === "all" ? "all" : args.tournamentScope === "wtt_only" ? "wtt_only" : undefined;
   const eventScope =
     args.eventScope === "all" ? "all" : args.eventScope === "singles_only" ? "singles_only" : undefined;
   const includeYouth = args.includeYouth === true ? true : args.includeYouth === false ? false : undefined;
@@ -676,9 +673,7 @@ async function toolStartWTTScrape(args: JsonObject): Promise<unknown> {
     pageSize: Number.isFinite(pageSize) ? pageSize : undefined,
     maxPages: Number.isFinite(maxPages) ? maxPages : undefined,
     maxEventsPerYear: Number.isFinite(maxEventsPerYear) ? maxEventsPerYear : undefined,
-    recentDays: Number.isFinite(recentDays) ? recentDays : undefined,
     delayMs: Number.isFinite(delayMs) ? delayMs : undefined,
-    tournamentScope,
     eventScope,
     includeYouth,
     profileEnrichMaxPlayers: Number.isFinite(profileEnrichMaxPlayers)
@@ -702,8 +697,6 @@ async function toolStartWTTAllTimeScrape(args: JsonObject): Promise<unknown> {
     return Number.isFinite(parsed) ? parsed : undefined;
   };
 
-  const tournamentScope =
-    args.tournamentScope === "all" ? "all" : args.tournamentScope === "wtt_only" ? "wtt_only" : undefined;
   const eventScope =
     args.eventScope === "all" ? "all" : args.eventScope === "singles_only" ? "singles_only" : undefined;
   const includeYouth = args.includeYouth === true ? true : args.includeYouth === false ? false : undefined;
@@ -714,9 +707,7 @@ async function toolStartWTTAllTimeScrape(args: JsonObject): Promise<unknown> {
     pageSize: numberOrUndefined(args.pageSize),
     maxPages: numberOrUndefined(args.maxPages),
     maxEventsPerYear: numberOrUndefined(args.maxEventsPerYear),
-    recentDays: numberOrUndefined(args.recentDays),
     delayMs: numberOrUndefined(args.delayMs),
-    tournamentScope,
     eventScope,
     includeYouth,
     profileEnrichMaxPlayers: numberOrUndefined(args.profileEnrichMaxPlayers),
@@ -730,9 +721,7 @@ async function toolStartWTTAllTimeScrape(args: JsonObject): Promise<unknown> {
       pageSize: numberOrUndefined(args.pageSize),
       maxPages: numberOrUndefined(args.maxPages),
       maxEventsPerYear: numberOrUndefined(args.maxEventsPerYear),
-      recentDays: numberOrUndefined(args.recentDays),
       delayMs: numberOrUndefined(args.delayMs),
-      tournamentScope,
       eventScope,
       includeYouth,
       profileEnrichMaxPlayers: numberOrUndefined(args.profileEnrichMaxPlayers),
@@ -1153,9 +1142,7 @@ const tools: Array<MCPToolDefinition & { handler: ToolHandler }> = [
         pageSize: { type: "integer", minimum: 1 },
         maxPages: { type: "integer", minimum: 1 },
         maxEventsPerYear: { type: "integer", minimum: 1 },
-        recentDays: { type: "integer", minimum: 1 },
         delayMs: { type: "integer", minimum: 0 },
-        tournamentScope: { type: "string", enum: ["wtt_only", "all"] },
         eventScope: { type: "string", enum: ["singles_only", "all"] },
         includeYouth: { type: "boolean" },
         profileEnrichMaxPlayers: { type: "integer", minimum: 0 },
@@ -1177,9 +1164,7 @@ const tools: Array<MCPToolDefinition & { handler: ToolHandler }> = [
         pageSize: { type: "integer", minimum: 1 },
         maxPages: { type: "integer", minimum: 1 },
         maxEventsPerYear: { type: "integer", minimum: 1 },
-        recentDays: { type: "integer", minimum: 1 },
         delayMs: { type: "integer", minimum: 0 },
-        tournamentScope: { type: "string", enum: ["wtt_only", "all"] },
         eventScope: { type: "string", enum: ["singles_only", "all"] },
         includeYouth: { type: "boolean" },
         profileEnrichMaxPlayers: { type: "integer", minimum: 0 },

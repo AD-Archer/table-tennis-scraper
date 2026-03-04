@@ -36,8 +36,6 @@ export async function POST(request: Request) {
       pageSize?: number;
       maxPages?: number;
       maxEventsPerYear?: number;
-      recentDays?: number;
-      tournamentScope?: "wtt_only" | "all";
       eventScope?: "singles_only" | "all";
       includeYouth?: boolean;
       reason?: string;
@@ -50,10 +48,8 @@ export async function POST(request: Request) {
       pageSize: body.pageSize,
       maxPages: body.maxPages,
       maxEventsPerYear: body.maxEventsPerYear,
-      recentDays: body.recentDays,
-      tournamentScope: body.tournamentScope ?? "wtt_only",
       eventScope: body.eventScope ?? "singles_only",
-      includeYouth: body.includeYouth ?? false,
+      includeYouth: body.includeYouth ?? true,
       reason: body.reason ?? "manual-api-trigger",
     });
 

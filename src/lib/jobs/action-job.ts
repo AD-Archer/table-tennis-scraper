@@ -71,9 +71,7 @@ export interface StartWTTActionJobOptions {
   pageSize?: number;
   maxPages?: number;
   maxEventsPerYear?: number;
-  recentDays?: number;
   delayMs?: number;
-  tournamentScope?: "wtt_only" | "all";
   eventScope?: "singles_only" | "all";
   includeYouth?: boolean;
   profileEnrichMaxPlayers?: number;
@@ -88,9 +86,7 @@ export interface StartWTTAllTimeActionJobOptions {
   pageSize?: number;
   maxPages?: number;
   maxEventsPerYear?: number;
-  recentDays?: number;
   delayMs?: number;
-  tournamentScope?: "wtt_only" | "all";
   eventScope?: "singles_only" | "all";
   includeYouth?: boolean;
   profileEnrichMaxPlayers?: number;
@@ -121,9 +117,7 @@ export interface WTTFollowupStatus {
     pageSize: number | null;
     maxPages: number | null;
     maxEventsPerYear: number | null;
-    recentDays: number | null;
     delayMs: number | null;
-    tournamentScope: "wtt_only" | "all";
     eventScope: "singles_only" | "all";
     includeYouth: boolean;
   } | null;
@@ -406,9 +400,7 @@ function normalizeWTTFollowupOptions(
     pageSize: options.pageSize ?? 50,
     maxPages: options.maxPages ?? 80,
     maxEventsPerYear: options.maxEventsPerYear ?? 16,
-    recentDays: options.recentDays ?? 45,
     delayMs: options.delayMs ?? 150,
-    tournamentScope: options.tournamentScope ?? "wtt_only",
     eventScope: options.eventScope ?? "singles_only",
     includeYouth: options.includeYouth ?? false,
     profileEnrichMaxPlayers: options.profileEnrichMaxPlayers ?? 0,
@@ -512,7 +504,6 @@ async function triggerScheduledWTTFollowup(): Promise<void> {
     mode: "wtt-followup-trigger",
     years: pending.years ?? [],
     maxEventsPerYear: pending.maxEventsPerYear ?? null,
-    recentDays: pending.recentDays ?? null,
     includeYouth: pending.includeYouth ?? false,
     backgroundReason: pending.backgroundReason ?? null,
   });
@@ -548,7 +539,6 @@ async function triggerScheduledWTTFollowup(): Promise<void> {
       startedJobId: status.jobId,
       years: pending.years ?? [],
       maxEventsPerYear: pending.maxEventsPerYear ?? null,
-      recentDays: pending.recentDays ?? null,
       includeYouth: pending.includeYouth ?? false,
     });
   } catch (error) {
@@ -679,9 +669,7 @@ export function scheduleWTTFollowupInBackground(
     pageSize: normalized.pageSize ?? null,
     maxPages: normalized.maxPages ?? null,
     maxEventsPerYear: normalized.maxEventsPerYear ?? null,
-    recentDays: normalized.recentDays ?? null,
     delayMs: normalized.delayMs ?? null,
-    tournamentScope: normalized.tournamentScope ?? "wtt_only",
     eventScope: normalized.eventScope ?? "singles_only",
     includeYouth: normalized.includeYouth ?? false,
   };
@@ -701,8 +689,6 @@ export function scheduleWTTFollowupInBackground(
       pageSize: normalized.pageSize ?? null,
       maxPages: normalized.maxPages ?? null,
       maxEventsPerYear: normalized.maxEventsPerYear ?? null,
-      recentDays: normalized.recentDays ?? null,
-      tournamentScope: normalized.tournamentScope ?? "wtt_only",
       eventScope: normalized.eventScope ?? "singles_only",
       includeYouth: normalized.includeYouth ?? false,
     },
@@ -1044,7 +1030,6 @@ async function runActionJob<T extends ActionJobType>(
           checks: {
             years: opts.years ?? [],
             maxEventsPerYear: opts.maxEventsPerYear ?? null,
-            recentDays: opts.recentDays ?? null,
             includeYouth: opts.includeYouth ?? false,
           },
         });
@@ -1052,18 +1037,16 @@ async function runActionJob<T extends ActionJobType>(
       emit(
         status,
         "API",
-        `Starting WTT scrape (years=${opts.years?.join(",") || "default"}, pageSize=${opts.pageSize ?? "default"}, maxPages=${opts.maxPages ?? "default"}, maxEventsPerYear=${opts.maxEventsPerYear ?? "default"}, recentDays=${opts.recentDays ?? "default"}, tournamentScope=${opts.tournamentScope ?? "wtt_only"}, eventScope=${opts.eventScope ?? "singles_only"}, includeYouth=${opts.includeYouth ?? false}).`,
+        `Starting WTT scrape (years=${opts.years?.join(",") || "default"}, pageSize=${opts.pageSize ?? "default"}, maxPages=${opts.maxPages ?? "default"}, maxEventsPerYear=${opts.maxEventsPerYear ?? "default"}, eventScope=${opts.eventScope ?? "singles_only"}, includeYouth=${opts.includeYouth ?? true}).`,
       );
       const result = await scrapeWTTMatches({
         years: opts.years,
         pageSize: opts.pageSize,
         maxPages: opts.maxPages,
         maxEventsPerYear: opts.maxEventsPerYear,
-        recentDays: opts.recentDays,
         delayMs: opts.delayMs,
-        tournamentScope: opts.tournamentScope,
         eventScope: opts.eventScope,
-        includeYouth: opts.includeYouth,
+        includeYouth: opts.includeYouth ?? true,
         profileEnrichMaxPlayers: opts.profileEnrichMaxPlayers,
         profileEnrichMinMatches: opts.profileEnrichMinMatches,
         onLog: (message) => appendWorkerLog(status, message),
@@ -1081,11 +1064,9 @@ async function runActionJob<T extends ActionJobType>(
           pageSize: opts.pageSize ?? 50,
           maxPages: Math.min(opts.maxPages ?? 180, 80),
           maxEventsPerYear: Math.min(opts.maxEventsPerYear ?? 16, 16),
-          recentDays: Math.min(opts.recentDays ?? 45, 45),
           delayMs: parseDelayEnv("WTT_FOLLOWUP_DELAY_MS", WTT_FOLLOWUP_DEFAULT_DELAY_MS),
-          tournamentScope: opts.tournamentScope ?? "wtt_only",
           eventScope: opts.eventScope ?? "singles_only",
-          includeYouth: opts.includeYouth ?? false,
+          includeYouth: opts.includeYouth ?? true,
           backgroundReason: "auto-after-wtt-job",
           profileEnrichMaxPlayers: 0,
           profileEnrichMinMatches: opts.profileEnrichMinMatches ?? 2,
@@ -1125,7 +1106,6 @@ async function runActionJob<T extends ActionJobType>(
             startYear: opts.startYear ?? null,
             endYear: opts.endYear ?? null,
             maxEventsPerYear: opts.maxEventsPerYear ?? null,
-            recentDays: opts.recentDays ?? null,
             includeYouth: opts.includeYouth ?? false,
           },
         });
@@ -1133,7 +1113,7 @@ async function runActionJob<T extends ActionJobType>(
       emit(
         status,
         "API",
-        `Starting WTT all-time scrape (range=${opts.startYear ?? "default"}-${opts.endYear ?? "default"}, pageSize=${opts.pageSize ?? "default"}, maxPages=${opts.maxPages ?? "default"}, maxEventsPerYear=${opts.maxEventsPerYear ?? "default"}, recentDays=${opts.recentDays ?? "default"}, tournamentScope=${opts.tournamentScope ?? "all"}, eventScope=${opts.eventScope ?? "singles_only"}, includeYouth=${opts.includeYouth ?? false}).`,
+        `Starting WTT all-time scrape (range=${opts.startYear ?? "default"}-${opts.endYear ?? "default"}, pageSize=${opts.pageSize ?? "default"}, maxPages=${opts.maxPages ?? "default"}, maxEventsPerYear=${opts.maxEventsPerYear ?? "default"}, eventScope=${opts.eventScope ?? "singles_only"}, includeYouth=${opts.includeYouth ?? true}).`,
       );
       const result = await scrapeWTTAllTime({
         startYear: opts.startYear,
@@ -1141,11 +1121,9 @@ async function runActionJob<T extends ActionJobType>(
         pageSize: opts.pageSize,
         maxPages: opts.maxPages,
         maxEventsPerYear: opts.maxEventsPerYear,
-        recentDays: opts.recentDays,
         delayMs: opts.delayMs,
-        tournamentScope: opts.tournamentScope,
         eventScope: opts.eventScope,
-        includeYouth: opts.includeYouth,
+        includeYouth: opts.includeYouth ?? true,
         profileEnrichMaxPlayers: opts.profileEnrichMaxPlayers,
         profileEnrichMinMatches: opts.profileEnrichMinMatches,
         onLog: (message) => appendWorkerLog(status, message),
@@ -1163,11 +1141,9 @@ async function runActionJob<T extends ActionJobType>(
           pageSize: opts.pageSize ?? 50,
           maxPages: Math.min(opts.maxPages ?? 180, 80),
           maxEventsPerYear: Math.min(opts.maxEventsPerYear ?? 16, 16),
-          recentDays: Math.min(opts.recentDays ?? 45, 45),
           delayMs: parseDelayEnv("WTT_FOLLOWUP_DELAY_MS", WTT_FOLLOWUP_DEFAULT_DELAY_MS),
-          tournamentScope: opts.tournamentScope ?? "wtt_only",
           eventScope: opts.eventScope ?? "singles_only",
-          includeYouth: opts.includeYouth ?? false,
+          includeYouth: opts.includeYouth ?? true,
           backgroundReason: "auto-after-wtt-all-time-job",
           profileEnrichMaxPlayers: 0,
           profileEnrichMinMatches: opts.profileEnrichMinMatches ?? 2,
@@ -1336,7 +1312,7 @@ export function startActionJob<T extends ActionJobType>(
   options: ActionJobOptionsByType[T],
 ): { alreadyRunning: boolean; status: ActionJobStatus } {
   const activeSameType = getActiveActionJob(type);
-  if (activeSameType && (activeSameType.state === "running" || type === "destroy-data")) {
+  if (activeSameType && activeSameType.state === "running") {
     return { alreadyRunning: true, status: activeSameType };
   }
 

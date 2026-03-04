@@ -31,7 +31,6 @@ const TTU_FUTURE_EVENT_GRACE_DAYS = 2;
 
 type WTTSourceBackend = "ttu" | "fabrik";
 
-export type WTTTournamentScope = "wtt_only" | "all";
 export type WTTEventScope = "singles_only" | "all";
 
 export interface WTTScrapeOptions {
@@ -39,10 +38,8 @@ export interface WTTScrapeOptions {
   pageSize?: number;
   maxPages?: number;
   maxEventsPerYear?: number;
-  recentDays?: number;
   delayMs?: number;
   listId?: string;
-  tournamentScope?: WTTTournamentScope;
   eventScope?: WTTEventScope;
   includeYouth?: boolean;
   profileEnrichMaxPlayers?: number;
@@ -76,10 +73,8 @@ export interface WTTAllTimeScrapeOptions {
   pageSize?: number;
   maxPages?: number;
   maxEventsPerYear?: number;
-  recentDays?: number;
   delayMs?: number;
   listId?: string;
-  tournamentScope?: WTTTournamentScope;
   eventScope?: WTTEventScope;
   includeYouth?: boolean;
   profileEnrichMaxPlayers?: number;
@@ -173,6 +168,7 @@ function mapRowToWTTPlayer(row: {
   wins: number;
   losses: number;
   sources: string[];
+  isYouth: boolean;
   lastSeenAt: Date | null;
 }): WTTPlayer {
   return {
@@ -201,6 +197,7 @@ function mapRowToWTTPlayer(row: {
       losses: row.losses,
     },
     sources: row.sources,
+    is_youth: row.isYouth,
     last_seen: row.lastSeenAt?.toISOString() ?? new Date().toISOString(),
   };
 }
@@ -458,15 +455,11 @@ function rowEvent(row: FabrikPlayerRow): string | null {
 function shouldKeepRowByScope(
   row: FabrikPlayerRow,
   options: {
-    tournamentScope: WTTTournamentScope;
     eventScope: WTTEventScope;
     includeYouth: boolean;
   },
-): "ok" | "tournament" | "event" | "youth" {
+): "ok" | "event" | "youth" {
   const tournament = rowTournament(row);
-  if (options.tournamentScope === "wtt_only" && !isWTTTournamentName(tournament)) {
-    return "tournament";
-  }
 
   const event = rowEvent(row);
   if (
@@ -652,6 +645,7 @@ function upsertPlayer(
   name: string | null,
   association: string | null,
   seed: WTTPlayer | null = null,
+  isYouthMatch: boolean = false,
 ): void {
   if (!ittfId) {
     return;
@@ -684,9 +678,14 @@ function upsertPlayer(
         losses: 0,
       },
       sources: [...new Set([...(seed?.sources ?? []), "fabrik_matches"])],
+      is_youth: isYouthMatch,
       last_seen: new Date().toISOString(),
     });
     return;
+  }
+
+  if (existing.is_youth && !isYouthMatch) {
+    existing.is_youth = false;
   }
 
   if (!existing.full_name && name) {
@@ -1248,14 +1247,7 @@ async function scrapeWTTMatchesViaTTU(
     Number.isFinite(maxEventsPerYearRaw) && (maxEventsPerYearRaw as number) > 0
       ? Math.min(Math.trunc(maxEventsPerYearRaw as number), 200)
       : null;
-  const recentDaysRaw = options.recentDays;
-  const recentDays =
-    Number.isFinite(recentDaysRaw) && (recentDaysRaw as number) > 0
-      ? Math.min(Math.trunc(recentDaysRaw as number), 3650)
-      : null;
-  const recentCutoffMs = recentDays ? Date.now() - recentDays * 24 * 60 * 60 * 1000 : null;
   const futureCutoffMs = Date.now() + TTU_FUTURE_EVENT_GRACE_DAYS * 24 * 60 * 60 * 1000;
-  const tournamentScope = options.tournamentScope ?? "wtt_only";
   const requestedEventScope = options.eventScope ?? "singles_only";
   const eventScope: WTTEventScope = "singles_only";
   const includeYouth = options.includeYouth ?? false;
@@ -1279,7 +1271,7 @@ async function scrapeWTTMatchesViaTTU(
 
   emit(
     options.onLog,
-    `Scraping WTT years: ${years.join(", ") || "none"} (backend=ttu, tournamentScope=${tournamentScope}, requestedEventScope=${requestedEventScope}, effectiveEventScope=${eventScope}, includeYouth=${includeYouth}, maxEventsPerYear=${maxEventsPerYear ?? "none"}, recentDays=${recentDays ?? "none"})`,
+    `Scraping WTT years: ${years.join(", ") || "none"} (backend=ttu, requestedEventScope=${requestedEventScope}, effectiveEventScope=${eventScope}, includeYouth=${includeYouth}, maxEventsPerYear=${maxEventsPerYear ?? "none"})`,
   );
   if (requestedEventScope === "all") {
     emit(
@@ -1291,7 +1283,6 @@ async function scrapeWTTMatchesViaTTU(
   for (const year of years) {
     const seenMatchIds = new Set<string>();
     let duplicateAcrossYears = 0;
-    let filteredTournament = 0;
     let filteredYouth = 0;
     emit(options.onLog, `Year ${year}: loading event list from TTU API.`);
 
@@ -1300,27 +1291,10 @@ async function scrapeWTTMatchesViaTTU(
       onLog: options.onLog,
     });
     const selectedEvents: TTUEventRow[] = [];
-    let filteredRecency = 0;
-    let filteredFuture = 0;
     for (const event of allEvents) {
-      if (tournamentScope === "wtt_only" && !isTTUWTTEvent(event)) {
-        filteredTournament += 1;
-        continue;
-      }
       if (!includeYouth && isTTUYouthEvent(event)) {
         filteredYouth += 1;
         continue;
-      }
-      if (recentCutoffMs) {
-        const eventDateMs = parseTTUEventDateMillis(event);
-        if (eventDateMs > 0 && eventDateMs < recentCutoffMs) {
-          filteredRecency += 1;
-          continue;
-        }
-        if (eventDateMs > futureCutoffMs) {
-          filteredFuture += 1;
-          continue;
-        }
       }
       selectedEvents.push(event);
     }
@@ -1340,7 +1314,7 @@ async function scrapeWTTMatchesViaTTU(
         : sortedSelected;
     emit(
       options.onLog,
-      `Year ${year}: events selected ${limitedEvents.length}/${allEvents.length} (filteredTournament=${filteredTournament}, filteredYouth=${filteredYouth}, filteredRecency=${filteredRecency}, filteredFuture=${filteredFuture}, limitedByMaxEvents=${maxEventsPerYear ? Math.max(0, sortedSelected.length - limitedEvents.length) : 0}).`,
+      `Year ${year}: events selected ${limitedEvents.length}/${allEvents.length} (filteredYouth=${filteredYouth}, limitedByMaxEvents=${maxEventsPerYear ? Math.max(0, sortedSelected.length - limitedEvents.length) : 0}).`,
     );
 
     const eventStreams: Array<WTTEventFetchCode> = ["MS", "WS"];
@@ -1440,6 +1414,7 @@ async function scrapeWTTMatchesViaTTU(
             a.name,
             a.association,
             a.ittf_id ? existingPlayers[a.ittf_id] ?? null : null,
+            normalized.is_youth ?? false,
           );
           upsertPlayer(
             players,
@@ -1447,6 +1422,7 @@ async function scrapeWTTMatchesViaTTU(
             x.name,
             x.association,
             x.ittf_id ? existingPlayers[x.ittf_id] ?? null : null,
+            normalized.is_youth ?? false,
           );
 
           if (normalized.match_id && a.ittf_id) {
@@ -1544,7 +1520,6 @@ async function scrapeWTTMatchesViaTTU(
           ? new Date(Date.now() + 120000).toISOString()
           : null,
       filters: {
-        tournamentScope,
         eventScope,
         requestedEventScope,
         includeYouth,
@@ -1756,7 +1731,6 @@ export async function scrapeWTTMatches(
   const maxPages = Math.max(1, options.maxPages ?? DEFAULT_MAX_PAGES);
   const delayMs = options.delayMs ?? DEFAULT_DELAY_MS;
   const listId = options.listId ?? DEFAULT_LIST_ID;
-  const tournamentScope = options.tournamentScope ?? "wtt_only";
   const requestedEventScope = options.eventScope ?? "singles_only";
   const eventScope: WTTEventScope = "singles_only";
   const includeYouth = options.includeYouth ?? false;
@@ -1779,7 +1753,7 @@ export async function scrapeWTTMatches(
   let youthMatches = 0;
   emit(
     options.onLog,
-    `Scraping WTT years: ${years.join(", ") || "none"} (pageSize=${pageSize}, maxPages=${maxPages}, tournamentScope=${tournamentScope}, requestedEventScope=${requestedEventScope}, effectiveEventScope=${eventScope}, includeYouth=${includeYouth})`,
+    `Scraping WTT years: ${years.join(", ") || "none"} (pageSize=${pageSize}, maxPages=${maxPages}, requestedEventScope=${requestedEventScope}, effectiveEventScope=${eventScope}, includeYouth=${includeYouth})`,
   );
   if (requestedEventScope === "all") {
     emit(
@@ -1791,7 +1765,6 @@ export async function scrapeWTTMatches(
   for (const year of years) {
     const seenMatchIds = new Set<string>();
     let filteredOutOfYear = 0;
-    let filteredTournament = 0;
     let filteredEvent = 0;
     let filteredYouth = 0;
     let duplicateAcrossYears = 0;
@@ -1836,14 +1809,9 @@ export async function scrapeWTTMatches(
           }
 
           const keepReason = shouldKeepRowByScope(row, {
-            tournamentScope,
             eventScope,
             includeYouth,
           });
-          if (keepReason === "tournament") {
-            filteredTournament += 1;
-            continue;
-          }
           if (keepReason === "event") {
             filteredEvent += 1;
             continue;
@@ -1890,6 +1858,7 @@ export async function scrapeWTTMatches(
             a.name,
             a.association,
             a.ittf_id ? existingPlayers[a.ittf_id] ?? null : null,
+            normalized.is_youth ?? false,
           );
           upsertPlayer(
             players,
@@ -1897,6 +1866,7 @@ export async function scrapeWTTMatches(
             x.name,
             x.association,
             x.ittf_id ? existingPlayers[x.ittf_id] ?? null : null,
+            normalized.is_youth ?? false,
           );
 
           if (normalized.match_id && a.ittf_id) {
@@ -1962,7 +1932,7 @@ export async function scrapeWTTMatches(
 
         emit(
           options.onLog,
-          `Year ${year}: stream ${streamLabel} page ${page + 1} processed (rows=${rows.length}, new=${newRows}, offset=${offset}, filteredOutOfYear=${filteredOutOfYear}, filteredTournament=${filteredTournament}, filteredEvent=${filteredEvent}, filteredYouth=${filteredYouth}, duplicateAcrossYears=${duplicateAcrossYears}, matches so far=${seenMatchIds.size})`,
+          `Year ${year}: stream ${streamLabel} page ${page + 1} processed (rows=${rows.length}, new=${newRows}, offset=${offset}, filteredOutOfYear=${filteredOutOfYear}, filteredEvent=${filteredEvent}, filteredYouth=${filteredYouth}, duplicateAcrossYears=${duplicateAcrossYears}, matches so far=${seenMatchIds.size})`,
         );
 
         if (rows.length < pageSize) {
@@ -1977,7 +1947,7 @@ export async function scrapeWTTMatches(
 
     emit(
       options.onLog,
-      `Year ${year}: complete, matches=${seenMatchIds.size}, filteredOutOfYear=${filteredOutOfYear}, filteredTournament=${filteredTournament}, filteredEvent=${filteredEvent}, filteredYouth=${filteredYouth}, duplicateAcrossYears=${duplicateAcrossYears}`,
+      `Year ${year}: complete, matches=${seenMatchIds.size}, filteredOutOfYear=${filteredOutOfYear}, filteredEvent=${filteredEvent}, filteredYouth=${filteredYouth}, duplicateAcrossYears=${duplicateAcrossYears}`,
     );
   }
 
@@ -2011,7 +1981,6 @@ export async function scrapeWTTMatches(
           ? new Date(Date.now() + 120000).toISOString()
           : null,
       filters: {
-        tournamentScope,
         eventScope,
         requestedEventScope,
         includeYouth,
@@ -2088,10 +2057,8 @@ export async function scrapeWTTAllTime(
     pageSize: options.pageSize,
     maxPages: options.maxPages,
     maxEventsPerYear: options.maxEventsPerYear,
-    recentDays: options.recentDays,
     delayMs: options.delayMs,
     listId: options.listId,
-    tournamentScope: options.tournamentScope,
     eventScope: options.eventScope,
     includeYouth: options.includeYouth,
     profileEnrichMaxPlayers: options.profileEnrichMaxPlayers,

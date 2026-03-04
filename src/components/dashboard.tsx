@@ -513,11 +513,9 @@ export function Dashboard({ initialOverview }: DashboardProps) {
         pageSize: 50,
         maxPages: 80,
         maxEventsPerYear: 18,
-        recentDays: 45,
         delayMs: 180,
-        tournamentScope: "wtt_only",
         eventScope: "singles_only",
-        includeYouth: false,
+        includeYouth: true,
         profileEnrichMaxPlayers: 600,
         profileEnrichMinMatches: 2,
       },
@@ -599,9 +597,8 @@ export function Dashboard({ initialOverview }: DashboardProps) {
         pageSize: 50,
         maxPages: 1400,
         delayMs: 120,
-        tournamentScope: "all",
         eventScope: "singles_only",
-        includeYouth: false,
+        includeYouth: true,
         profileEnrichMaxPlayers: 0,
         profileEnrichMinMatches: 3,
       },
@@ -795,7 +792,7 @@ export function Dashboard({ initialOverview }: DashboardProps) {
           </label>
           <p className="hint">
             Uses TTU/WTT result feeds with default filters:
-            WTT tournaments + singles-only + no youth. Writes
+            singles-only (including youth events). Writes
             <code>players.json</code>, <code>matches.json</code>, and <code>dataset.json</code>.
           </p>
           <p className="hint">
@@ -831,7 +828,7 @@ export function Dashboard({ initialOverview }: DashboardProps) {
             Discover all available years and scrape WTT/ITTF data without touching TTBL files.
           </p>
           <p className="hint">
-            This is a weaker master sync: WTT all-time + player registry rebuild only, limited to men&apos;s/women&apos;s singles and youth excluded by default.
+            This is a weaker master sync: WTT all-time + player registry rebuild only, limited to singles (including youth events by default).
           </p>
           <button
             className="btn btn-secondary btn-block"

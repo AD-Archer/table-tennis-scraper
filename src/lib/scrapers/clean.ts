@@ -144,9 +144,8 @@ export async function runCleanScrape(
     pageSize: resolved.wttPageSize,
     maxPages: resolved.wttMaxPages,
     delayMs: resolved.delayMs,
-    tournamentScope: "all",
     eventScope: "singles_only",
-    includeYouth: false,
+    includeYouth: true,
     profileEnrichMaxPlayers: 0,
     onLog,
   });
@@ -158,9 +157,8 @@ export async function runCleanScrape(
     const followup = scheduleWTTFollowupInBackground({
       years: wtt.scrape.years,
       delayMs: 120000,
-      tournamentScope: "wtt_only",
       eventScope: "singles_only",
-      includeYouth: false,
+      includeYouth: true,
       backgroundReason: "auto-after-clean-job",
       reason: "auto-after-clean-job",
     });

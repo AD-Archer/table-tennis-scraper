@@ -190,6 +190,7 @@ function upsertPlayerFromMatch(
   ittfId: string | null,
   name: string | null,
   association: string | null,
+  isYouthMatch: boolean = false,
 ): void {
   if (!ittfId) {
     return;
@@ -198,6 +199,9 @@ function upsertPlayerFromMatch(
   const existing = players[ittfId];
   if (existing) {
     existing.last_seen = new Date().toISOString();
+    if (existing.is_youth && !isYouthMatch) {
+      existing.is_youth = false;
+    }
     if (!existing.sources.includes("wtt_cms")) {
       existing.sources.push("wtt_cms");
     }
@@ -225,6 +229,7 @@ function upsertPlayerFromMatch(
     headshot_url: null,
     stats: { matches_played: 0, wins: 0, losses: 0 },
     sources: ["wtt_cms"],
+    is_youth: isYouthMatch,
     last_seen: new Date().toISOString(),
   };
 }
@@ -289,12 +294,14 @@ export async function ingestMatchCard(
     match.players.a.ittf_id,
     match.players.a.name,
     match.players.a.association,
+    match.is_youth ?? false,
   );
   upsertPlayerFromMatch(
     players,
     match.players.x.ittf_id,
     match.players.x.name,
     match.players.x.association,
+    match.is_youth ?? false,
   );
 
   const aId = match.players.a.ittf_id;
