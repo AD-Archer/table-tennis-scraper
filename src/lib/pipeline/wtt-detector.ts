@@ -49,14 +49,10 @@ function log(message: string): void {
 // Event filtering
 // ---------------------------------------------------------------------------
 
-function isSeniorSingles(subEventType: string): boolean {
+function isSingles(subEventType: string): boolean {
   const normalized = subEventType.trim().toUpperCase().replace(/\s+/g, "");
 
   if (!normalized.includes("SINGLES")) {
-    return false;
-  }
-
-  if (/U\d+/.test(normalized)) {
     return false;
   }
 
@@ -66,9 +62,10 @@ function isSeniorSingles(subEventType: string): boolean {
     normalized.includes("BOY") ||
     normalized.includes("GIRL")
   ) {
-    if (normalized.includes("BOY") || normalized.includes("GIRL")) {
-      return false;
-    }
+    return true;
+  }
+
+  if (/U\d+/.test(normalized)) {
     return true;
   }
 
@@ -80,13 +77,13 @@ function isSeniorSingles(subEventType: string): boolean {
 }
 
 function filterSinglesLive(matches: WTTCMSLiveMatch[]): WTTCMSLiveMatch[] {
-  return matches.filter((m) => isSeniorSingles(m.subEventType));
+  return matches.filter((m) => isSingles(m.subEventType));
 }
 
 function filterSinglesOfficial(
   matches: WTTCMSOfficialMatch[],
 ): WTTCMSOfficialMatch[] {
-  return matches.filter((m) => isSeniorSingles(m.subEventType));
+  return matches.filter((m) => isSingles(m.subEventType));
 }
 
 // ---------------------------------------------------------------------------
@@ -129,7 +126,7 @@ async function tick(): Promise<void> {
   const liveEventIds = [...new Set(singlesLive.map((m) => m.eventId))];
 
   log(
-    `GetLiveResult: ${allLive.length} total, ${singlesLive.length} senior singles across ${liveEventIds.length} events.`,
+    `GetLiveResult: ${allLive.length} total, ${singlesLive.length} singles across ${liveEventIds.length} events.`,
   );
 
   // 2. Mode transitions

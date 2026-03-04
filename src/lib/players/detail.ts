@@ -60,6 +60,7 @@ function createEmptyWTTPlayer(ittfId: string): WTTPlayer {
       losses: 0,
     },
     sources: [],
+    is_youth: false,
     last_seen: new Date().toISOString(),
   };
 }
@@ -85,6 +86,7 @@ function fromWTTPlayerRow(row: {
   wins: number;
   losses: number;
   sources: string[];
+  isYouth: boolean;
   lastSeenAt: Date | null;
 }): WTTPlayer {
   const gender =
@@ -114,6 +116,7 @@ function fromWTTPlayerRow(row: {
       losses: row.losses,
     },
     sources: row.sources,
+    is_youth: row.isYouth,
     last_seen: row.lastSeenAt?.toISOString() ?? new Date().toISOString(),
   };
 }

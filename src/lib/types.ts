@@ -101,6 +101,7 @@ export interface WTTPlayer {
     losses: number;
   };
   sources: string[];
+  is_youth: boolean;
   last_seen: string;
 }
 

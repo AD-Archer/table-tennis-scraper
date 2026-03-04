@@ -389,6 +389,7 @@ export async function persistWTTSnapshotToDb(input: WTTSnapshotInput): Promise<v
           wins: player.stats.wins,
           losses: player.stats.losses,
           sources: [...new Set(player.sources)],
+          isYouth: Boolean(player.is_youth),
           lastSeenAt: toDateOrNull(player.last_seen),
         },
         update: {
@@ -411,6 +412,7 @@ export async function persistWTTSnapshotToDb(input: WTTSnapshotInput): Promise<v
           wins: player.stats.wins,
           losses: player.stats.losses,
           sources: [...new Set(player.sources)],
+          isYouth: Boolean(player.is_youth),
           lastSeenAt: toDateOrNull(player.last_seen),
         },
       });
