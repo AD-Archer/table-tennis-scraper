@@ -1037,7 +1037,7 @@ async function runActionJob<T extends ActionJobType>(
       emit(
         status,
         "API",
-        `Starting WTT scrape (years=${opts.years?.join(",") || "default"}, pageSize=${opts.pageSize ?? "default"}, maxPages=${opts.maxPages ?? "default"}, maxEventsPerYear=${opts.maxEventsPerYear ?? "default"}, eventScope=${opts.eventScope ?? "singles_only"}, includeYouth=${opts.includeYouth ?? false}).`,
+        `Starting WTT scrape (years=${opts.years?.join(",") || "default"}, pageSize=${opts.pageSize ?? "default"}, maxPages=${opts.maxPages ?? "default"}, maxEventsPerYear=${opts.maxEventsPerYear ?? "default"}, eventScope=${opts.eventScope ?? "singles_only"}, includeYouth=${opts.includeYouth ?? true}).`,
       );
       const result = await scrapeWTTMatches({
         years: opts.years,
@@ -1046,7 +1046,7 @@ async function runActionJob<T extends ActionJobType>(
         maxEventsPerYear: opts.maxEventsPerYear,
         delayMs: opts.delayMs,
         eventScope: opts.eventScope,
-        includeYouth: opts.includeYouth,
+        includeYouth: opts.includeYouth ?? true,
         profileEnrichMaxPlayers: opts.profileEnrichMaxPlayers,
         profileEnrichMinMatches: opts.profileEnrichMinMatches,
         onLog: (message) => appendWorkerLog(status, message),
@@ -1066,7 +1066,7 @@ async function runActionJob<T extends ActionJobType>(
           maxEventsPerYear: Math.min(opts.maxEventsPerYear ?? 16, 16),
           delayMs: parseDelayEnv("WTT_FOLLOWUP_DELAY_MS", WTT_FOLLOWUP_DEFAULT_DELAY_MS),
           eventScope: opts.eventScope ?? "singles_only",
-          includeYouth: opts.includeYouth ?? false,
+          includeYouth: opts.includeYouth ?? true,
           backgroundReason: "auto-after-wtt-job",
           profileEnrichMaxPlayers: 0,
           profileEnrichMinMatches: opts.profileEnrichMinMatches ?? 2,
@@ -1113,7 +1113,7 @@ async function runActionJob<T extends ActionJobType>(
       emit(
         status,
         "API",
-        `Starting WTT all-time scrape (range=${opts.startYear ?? "default"}-${opts.endYear ?? "default"}, pageSize=${opts.pageSize ?? "default"}, maxPages=${opts.maxPages ?? "default"}, maxEventsPerYear=${opts.maxEventsPerYear ?? "default"}, eventScope=${opts.eventScope ?? "singles_only"}, includeYouth=${opts.includeYouth ?? false}).`,
+        `Starting WTT all-time scrape (range=${opts.startYear ?? "default"}-${opts.endYear ?? "default"}, pageSize=${opts.pageSize ?? "default"}, maxPages=${opts.maxPages ?? "default"}, maxEventsPerYear=${opts.maxEventsPerYear ?? "default"}, eventScope=${opts.eventScope ?? "singles_only"}, includeYouth=${opts.includeYouth ?? true}).`,
       );
       const result = await scrapeWTTAllTime({
         startYear: opts.startYear,
@@ -1123,7 +1123,7 @@ async function runActionJob<T extends ActionJobType>(
         maxEventsPerYear: opts.maxEventsPerYear,
         delayMs: opts.delayMs,
         eventScope: opts.eventScope,
-        includeYouth: opts.includeYouth,
+        includeYouth: opts.includeYouth ?? true,
         profileEnrichMaxPlayers: opts.profileEnrichMaxPlayers,
         profileEnrichMinMatches: opts.profileEnrichMinMatches,
         onLog: (message) => appendWorkerLog(status, message),
@@ -1143,7 +1143,7 @@ async function runActionJob<T extends ActionJobType>(
           maxEventsPerYear: Math.min(opts.maxEventsPerYear ?? 16, 16),
           delayMs: parseDelayEnv("WTT_FOLLOWUP_DELAY_MS", WTT_FOLLOWUP_DEFAULT_DELAY_MS),
           eventScope: opts.eventScope ?? "singles_only",
-          includeYouth: opts.includeYouth ?? false,
+          includeYouth: opts.includeYouth ?? true,
           backgroundReason: "auto-after-wtt-all-time-job",
           profileEnrichMaxPlayers: 0,
           profileEnrichMinMatches: opts.profileEnrichMinMatches ?? 2,
