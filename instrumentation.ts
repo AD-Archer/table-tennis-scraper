@@ -17,5 +17,19 @@ export async function register() {
         });
       }
     }
+
+    if (process.env.TTBL_PIPELINE_ENABLED === "true") {
+      try {
+        const { startTTBLPipeline } = await import(
+          "@/lib/pipeline/ttbl-detector"
+        );
+        startTTBLPipeline();
+      } catch (error) {
+        console.error(
+          "[TTBL-PIPELINE] Failed to start pipeline:",
+          error instanceof Error ? error.message : error,
+        );
+      }
+    }
   }
 }
