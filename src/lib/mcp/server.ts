@@ -92,6 +92,79 @@ const MAX_MATCH_LIMIT = 1000;
 const DEFAULT_MATCH_LIMIT = 100;
 const MAX_PLACE_LIMIT = 500;
 const DEFAULT_PLACE_LIMIT = 100;
+const MATCH_FIELDS = [
+  "source",
+  "matchId",
+  "seasonOrYear",
+  "occurredAt",
+  "state",
+  "notFinished",
+  "ongoing",
+  "today",
+  "legacy",
+  "place",
+  "event",
+  "homeOrPlayerA",
+  "awayOrPlayerX",
+  "score",
+] as const;
+type DiagnosticMatchField = (typeof MATCH_FIELDS)[number];
+type MatchView = "compact" | "status" | "context" | "participants" | "full";
+type ResolvedMatchView = MatchView | "custom";
+const MATCH_FIELD_SET = new Set<string>(MATCH_FIELDS);
+const MATCH_VIEW_FIELDS: Record<MatchView, DiagnosticMatchField[]> = {
+  compact: ["source", "matchId", "seasonOrYear", "occurredAt", "score"],
+  status: [
+    "source",
+    "matchId",
+    "seasonOrYear",
+    "occurredAt",
+    "state",
+    "notFinished",
+    "ongoing",
+    "today",
+    "legacy",
+    "score",
+  ],
+  context: [
+    "source",
+    "matchId",
+    "seasonOrYear",
+    "occurredAt",
+    "place",
+    "event",
+    "homeOrPlayerA",
+    "awayOrPlayerX",
+    "score",
+  ],
+  participants: [
+    "source",
+    "matchId",
+    "seasonOrYear",
+    "homeOrPlayerA",
+    "awayOrPlayerX",
+    "score",
+  ],
+  full: [...MATCH_FIELDS],
+};
+const PLACE_FIELDS = [
+  "source",
+  "place",
+  "matches",
+  "currentMatches",
+  "legacyMatches",
+  "todayMatches",
+  "ongoingMatches",
+] as const;
+type DiagnosticPlaceField = (typeof PLACE_FIELDS)[number];
+type PlaceView = "compact" | "activity" | "full";
+type ResolvedPlaceView = PlaceView | "custom";
+const PLACE_FIELD_SET = new Set<string>(PLACE_FIELDS);
+const PLACE_VIEW_FIELDS: Record<PlaceView, DiagnosticPlaceField[]> = {
+  compact: ["source", "place", "matches"],
+  activity: ["source", "place", "todayMatches", "ongoingMatches", "matches"],
+  full: [...PLACE_FIELDS],
+};
 const ACTION_JOB_TYPES: ActionJobType[] = [
   "ttbl",
   "ttbl-legacy",
@@ -594,6 +667,127 @@ function filterPlaces(places: DiagnosticPlace[], args: JsonObject): DiagnosticPl
   });
 }
 
+function parseTokenList(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item).trim()).filter(Boolean);
+  }
+  if (typeof value === "string") {
+    return value
+      .split(",")
+      .map((token) => token.trim())
+      .filter(Boolean);
+  }
+  return [];
+}
+
+function parseMatchView(value: unknown, fallback: MatchView): MatchView {
+  if (typeof value !== "string") {
+    return fallback;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  return normalized in MATCH_VIEW_FIELDS ? (normalized as MatchView) : fallback;
+}
+
+function parsePlaceView(value: unknown, fallback: PlaceView): PlaceView {
+  if (typeof value !== "string") {
+    return fallback;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  return normalized in PLACE_VIEW_FIELDS ? (normalized as PlaceView) : fallback;
+}
+
+function parseMatchFields(value: unknown): DiagnosticMatchField[] {
+  const selected: DiagnosticMatchField[] = [];
+  const seen = new Set<DiagnosticMatchField>();
+
+  for (const token of parseTokenList(value)) {
+    if (!MATCH_FIELD_SET.has(token)) {
+      continue;
+    }
+    const field = token as DiagnosticMatchField;
+    if (!seen.has(field)) {
+      selected.push(field);
+      seen.add(field);
+    }
+  }
+
+  return selected;
+}
+
+function parsePlaceFields(value: unknown): DiagnosticPlaceField[] {
+  const selected: DiagnosticPlaceField[] = [];
+  const seen = new Set<DiagnosticPlaceField>();
+
+  for (const token of parseTokenList(value)) {
+    if (!PLACE_FIELD_SET.has(token)) {
+      continue;
+    }
+    const field = token as DiagnosticPlaceField;
+    if (!seen.has(field)) {
+      selected.push(field);
+      seen.add(field);
+    }
+  }
+
+  return selected;
+}
+
+function resolveMatchProjection(
+  args: JsonObject,
+  fallbackView: MatchView,
+): { view: ResolvedMatchView; fields: DiagnosticMatchField[] } {
+  const customFields = parseMatchFields(args.fields);
+  if (customFields.length > 0) {
+    return {
+      view: "custom",
+      fields: customFields,
+    };
+  }
+
+  const view = parseMatchView(args.view, fallbackView);
+  return {
+    view,
+    fields: MATCH_VIEW_FIELDS[view],
+  };
+}
+
+function resolvePlaceProjection(
+  args: JsonObject,
+  fallbackView: PlaceView,
+): { view: ResolvedPlaceView; fields: DiagnosticPlaceField[] } {
+  const customFields = parsePlaceFields(args.fields);
+  if (customFields.length > 0) {
+    return {
+      view: "custom",
+      fields: customFields,
+    };
+  }
+
+  const view = parsePlaceView(args.view, fallbackView);
+  return {
+    view,
+    fields: PLACE_VIEW_FIELDS[view],
+  };
+}
+
+function projectMatch(row: DiagnosticMatch, fields: DiagnosticMatchField[]): JsonObject {
+  const projected: JsonObject = {};
+  for (const field of fields) {
+    projected[field] = row[field];
+  }
+  return projected;
+}
+
+function projectPlace(row: DiagnosticPlace, fields: DiagnosticPlaceField[]): JsonObject {
+  const projected: JsonObject = {};
+  for (const field of fields) {
+    projected[field] = row[field];
+  }
+  return projected;
+}
+
 function getDatasetFromContext(ctx: ToolContext): Promise<DatasetSnapshot> {
   if (ctx.dataset) {
     return Promise.resolve(ctx.dataset);
@@ -864,7 +1058,11 @@ async function toolCancelScrapeJobs(args: JsonObject): Promise<unknown> {
   };
 }
 
-async function toolListMatches(args: JsonObject, ctx: ToolContext): Promise<unknown> {
+async function toolListMatches(
+  args: JsonObject,
+  ctx: ToolContext,
+  fallbackView: MatchView = "compact",
+): Promise<unknown> {
   const dataset = await getDatasetFromContext(ctx);
   const limit = clamp(
     Number.parseInt(String(args.limit ?? DEFAULT_MATCH_LIMIT), 10) || DEFAULT_MATCH_LIMIT,
@@ -874,11 +1072,16 @@ async function toolListMatches(args: JsonObject, ctx: ToolContext): Promise<unkn
 
   const filtered = filterMatches(dataset.matches, args);
   const rows = filtered.slice(0, limit);
+  const projection = resolveMatchProjection(args, fallbackView);
   return {
     generatedAt: dataset.generatedAt,
     totalMatches: filtered.length,
     returnedMatches: rows.length,
     truncated: filtered.length > rows.length,
+    projection: {
+      view: projection.view,
+      fields: projection.fields,
+    },
     filters: {
       source: args.source ?? "all",
       scope: args.scope ?? "all",
@@ -888,14 +1091,43 @@ async function toolListMatches(args: JsonObject, ctx: ToolContext): Promise<unkn
       limit,
     },
     notes: [
+      "Use view/fields to keep responses small for the exact context you need.",
       "today/ongoing are reliable for TTBL timestamps and states.",
-      "WTT rows now persist result_status/ongoing/not_finished when available from source feeds.",
+      "WTT rows persist result_status/ongoing/not_finished when available from source feeds.",
     ],
-    matches: rows,
+    matches: rows.map((row) => projectMatch(row, projection.fields)),
   };
 }
 
-async function toolListPlaces(args: JsonObject, ctx: ToolContext): Promise<unknown> {
+async function toolListMatchStatus(args: JsonObject, ctx: ToolContext): Promise<unknown> {
+  const scopedArgs: JsonObject = {
+    ...args,
+    view: args.view ?? "status",
+  };
+  return await toolListMatches(scopedArgs, ctx, "status");
+}
+
+async function toolListMatchContext(args: JsonObject, ctx: ToolContext): Promise<unknown> {
+  const scopedArgs: JsonObject = {
+    ...args,
+    view: args.view ?? "context",
+  };
+  return await toolListMatches(scopedArgs, ctx, "context");
+}
+
+async function toolListMatchParticipants(args: JsonObject, ctx: ToolContext): Promise<unknown> {
+  const scopedArgs: JsonObject = {
+    ...args,
+    view: args.view ?? "participants",
+  };
+  return await toolListMatches(scopedArgs, ctx, "participants");
+}
+
+async function toolListPlaces(
+  args: JsonObject,
+  ctx: ToolContext,
+  fallbackView: PlaceView = "compact",
+): Promise<unknown> {
   const dataset = await getDatasetFromContext(ctx);
   const limit = clamp(
     Number.parseInt(String(args.limit ?? DEFAULT_PLACE_LIMIT), 10) || DEFAULT_PLACE_LIMIT,
@@ -905,19 +1137,32 @@ async function toolListPlaces(args: JsonObject, ctx: ToolContext): Promise<unkno
 
   const filtered = filterPlaces(dataset.places, args);
   const rows = filtered.slice(0, limit);
+  const projection = resolvePlaceProjection(args, fallbackView);
   return {
     generatedAt: dataset.generatedAt,
     totalPlaces: filtered.length,
     returnedPlaces: rows.length,
     truncated: filtered.length > rows.length,
+    projection: {
+      view: projection.view,
+      fields: projection.fields,
+    },
     filters: {
       source: args.source ?? "all",
       scope: args.scope ?? "all",
       query: args.query ?? null,
       limit,
     },
-    places: rows,
+    places: rows.map((row) => projectPlace(row, projection.fields)),
   };
+}
+
+async function toolListPlaceActivity(args: JsonObject, ctx: ToolContext): Promise<unknown> {
+  const scopedArgs: JsonObject = {
+    ...args,
+    view: args.view ?? "activity",
+  };
+  return await toolListPlaces(scopedArgs, ctx, "activity");
 }
 
 async function toolHealthCheck(args: JsonObject, ctx: ToolContext): Promise<unknown> {
@@ -925,7 +1170,19 @@ async function toolHealthCheck(args: JsonObject, ctx: ToolContext): Promise<unkn
   const now = new Date();
   const currentYear = now.getUTCFullYear();
   const currentTTBLSeason = resolveCurrentTTBLSeason(now);
-  const includeSamples = args.includeSamples !== false;
+  const includeSamples = args.includeSamples === true;
+  const sampleLimit = clamp(
+    Number.parseInt(String(args.sampleLimit ?? 10), 10) || 10,
+    1,
+    100,
+  );
+  const sampleProjection = resolveMatchProjection(
+    {
+      view: args.sampleView,
+      fields: args.sampleFields,
+    },
+    "status",
+  );
 
   const hasCurrentTTBLSeason = dataset.matches.some(
     (row) => row.source === "ttbl" && row.seasonOrYear === currentTTBLSeason,
@@ -1005,9 +1262,19 @@ async function toolHealthCheck(args: JsonObject, ctx: ToolContext): Promise<unkn
     },
     samples: includeSamples
       ? {
-          todayMatches: todayMatches.slice(0, 10),
-          ongoingMatches: ongoingMatches.slice(0, 10),
-          notFinishedMatches: notFinishedMatches.slice(0, 10),
+          projection: {
+            view: sampleProjection.view,
+            fields: sampleProjection.fields,
+          },
+          todayMatches: todayMatches
+            .slice(0, sampleLimit)
+            .map((row) => projectMatch(row, sampleProjection.fields)),
+          ongoingMatches: ongoingMatches
+            .slice(0, sampleLimit)
+            .map((row) => projectMatch(row, sampleProjection.fields)),
+          notFinishedMatches: notFinishedMatches
+            .slice(0, sampleLimit)
+            .map((row) => projectMatch(row, sampleProjection.fields)),
         }
       : null,
     assumptions: [
@@ -1251,7 +1518,7 @@ const tools: Array<MCPToolDefinition & { handler: ToolHandler }> = [
   {
     name: "list_matches",
     description:
-      "List TTBL/WTT matches with filters for today, ongoing, not finished, legacy, current, season/year, and query.",
+      "List TTBL/WTT matches with filters and response projection controls (view/fields).",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -1264,15 +1531,130 @@ const tools: Array<MCPToolDefinition & { handler: ToolHandler }> = [
         season: { type: "string" },
         year: { type: "integer" },
         query: { type: "string" },
+        view: {
+          type: "string",
+          enum: ["compact", "status", "context", "participants", "full"],
+        },
+        fields: {
+          anyOf: [
+            { type: "string", description: "CSV list of match fields" },
+            {
+              type: "array",
+              items: { type: "string", enum: MATCH_FIELDS },
+            },
+          ],
+        },
         limit: { type: "integer", minimum: 1, maximum: MAX_MATCH_LIMIT },
       },
     },
     handler: async (args, ctx) => await toolListMatches(args, ctx),
   },
   {
+    name: "list_match_status",
+    description:
+      "List lightweight status rows for orchestration (state flags + score).",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        source: { type: "string", enum: ["all", "ttbl", "wtt"] },
+        scope: {
+          type: "string",
+          enum: ["all", "today", "ongoing", "not_finished", "legacy", "current"],
+        },
+        season: { type: "string" },
+        year: { type: "integer" },
+        query: { type: "string" },
+        view: {
+          type: "string",
+          enum: ["status", "compact", "full"],
+        },
+        fields: {
+          anyOf: [
+            { type: "string", description: "CSV list of match fields" },
+            {
+              type: "array",
+              items: { type: "string", enum: MATCH_FIELDS },
+            },
+          ],
+        },
+        limit: { type: "integer", minimum: 1, maximum: MAX_MATCH_LIMIT },
+      },
+    },
+    handler: async (args, ctx) => await toolListMatchStatus(args, ctx),
+  },
+  {
+    name: "list_match_context",
+    description:
+      "List contextual rows focused on venue/event and player names.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        source: { type: "string", enum: ["all", "ttbl", "wtt"] },
+        scope: {
+          type: "string",
+          enum: ["all", "today", "ongoing", "not_finished", "legacy", "current"],
+        },
+        season: { type: "string" },
+        year: { type: "integer" },
+        query: { type: "string" },
+        view: {
+          type: "string",
+          enum: ["context", "participants", "compact", "full"],
+        },
+        fields: {
+          anyOf: [
+            { type: "string", description: "CSV list of match fields" },
+            {
+              type: "array",
+              items: { type: "string", enum: MATCH_FIELDS },
+            },
+          ],
+        },
+        limit: { type: "integer", minimum: 1, maximum: MAX_MATCH_LIMIT },
+      },
+    },
+    handler: async (args, ctx) => await toolListMatchContext(args, ctx),
+  },
+  {
+    name: "list_match_participants",
+    description:
+      "List only matchup-level rows (players + score) to minimize payload size.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        source: { type: "string", enum: ["all", "ttbl", "wtt"] },
+        scope: {
+          type: "string",
+          enum: ["all", "today", "ongoing", "not_finished", "legacy", "current"],
+        },
+        season: { type: "string" },
+        year: { type: "integer" },
+        query: { type: "string" },
+        view: {
+          type: "string",
+          enum: ["participants", "compact", "full"],
+        },
+        fields: {
+          anyOf: [
+            { type: "string", description: "CSV list of match fields" },
+            {
+              type: "array",
+              items: { type: "string", enum: MATCH_FIELDS },
+            },
+          ],
+        },
+        limit: { type: "integer", minimum: 1, maximum: MAX_MATCH_LIMIT },
+      },
+    },
+    handler: async (args, ctx) => await toolListMatchParticipants(args, ctx),
+  },
+  {
     name: "list_places",
     description:
-      "List TTBL venues and WTT tournaments with match counts and scope filters.",
+      "List TTBL venues and WTT tournaments with projection controls (view/fields).",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -1283,20 +1665,78 @@ const tools: Array<MCPToolDefinition & { handler: ToolHandler }> = [
           enum: ["all", "today", "ongoing", "legacy", "current"],
         },
         query: { type: "string" },
+        view: {
+          type: "string",
+          enum: ["compact", "activity", "full"],
+        },
+        fields: {
+          anyOf: [
+            { type: "string", description: "CSV list of place fields" },
+            {
+              type: "array",
+              items: { type: "string", enum: PLACE_FIELDS },
+            },
+          ],
+        },
         limit: { type: "integer", minimum: 1, maximum: MAX_PLACE_LIMIT },
       },
     },
     handler: async (args, ctx) => await toolListPlaces(args, ctx),
   },
   {
+    name: "list_place_activity",
+    description: "List lightweight place activity rows (today/ongoing/totals).",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        source: { type: "string", enum: ["all", "ttbl", "wtt"] },
+        scope: {
+          type: "string",
+          enum: ["all", "today", "ongoing", "legacy", "current"],
+        },
+        query: { type: "string" },
+        view: {
+          type: "string",
+          enum: ["activity", "compact", "full"],
+        },
+        fields: {
+          anyOf: [
+            { type: "string", description: "CSV list of place fields" },
+            {
+              type: "array",
+              items: { type: "string", enum: PLACE_FIELDS },
+            },
+          ],
+        },
+        limit: { type: "integer", minimum: 1, maximum: MAX_PLACE_LIMIT },
+      },
+    },
+    handler: async (args, ctx) => await toolListPlaceActivity(args, ctx),
+  },
+  {
     name: "health_check",
     description:
-      "Run scrape health diagnostics (current year, today, ongoing, legacy, and latest job states).",
+      "Run scrape health diagnostics (current year, today, ongoing, legacy, and latest job states). Samples are opt-in.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
       properties: {
         includeSamples: { type: "boolean" },
+        sampleLimit: { type: "integer", minimum: 1, maximum: 100 },
+        sampleView: {
+          type: "string",
+          enum: ["status", "compact", "context", "participants", "full"],
+        },
+        sampleFields: {
+          anyOf: [
+            { type: "string", description: "CSV list of match fields" },
+            {
+              type: "array",
+              items: { type: "string", enum: MATCH_FIELDS },
+            },
+          ],
+        },
       },
     },
     handler: async (args, ctx) => await toolHealthCheck(args, ctx),
@@ -1394,7 +1834,15 @@ async function callTool(name: string, args: JsonObject): Promise<unknown> {
     throw new Error(`Unknown tool: ${name}`);
   }
 
-  const needsDataset = name === "list_matches" || name === "list_places" || name === "health_check";
+  const needsDataset = [
+    "list_matches",
+    "list_match_status",
+    "list_match_context",
+    "list_match_participants",
+    "list_places",
+    "list_place_activity",
+    "health_check",
+  ].includes(name);
   const ctx: ToolContext = {};
   if (needsDataset) {
     ctx.dataset = await buildDatasetSnapshot();

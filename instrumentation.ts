@@ -7,10 +7,14 @@ export async function register() {
         );
         startWTTPipeline();
       } catch (error) {
-        console.error(
-          "[WTT-PIPELINE] Failed to start pipeline:",
-          error instanceof Error ? error.message : error,
-        );
+        const { logServerEvent } = await import("@/lib/server/logger");
+        logServerEvent({
+          level: "error",
+          scope: "instrumentation",
+          event: "wtt_pipeline_start_failed",
+          message: "Failed to start WTT pipeline.",
+          error,
+        });
       }
     }
   }

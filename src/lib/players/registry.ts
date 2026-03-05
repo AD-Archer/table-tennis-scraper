@@ -265,6 +265,35 @@ function hasCloseBirthYearMatch(
   return false;
 }
 
+function parseIsoDate(value: string): Date | null {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+  return parsed;
+}
+
+function areDobValuesNear(values: string[], maxYearSpread = 1, maxDaySpread = 400): boolean {
+  const parsed = values
+    .map((value) => parseIsoDate(value))
+    .filter((value): value is Date => Boolean(value))
+    .sort((a, b) => a.getTime() - b.getTime());
+  if (parsed.length <= 1) {
+    return parsed.length === values.length;
+  }
+
+  const first = parsed[0];
+  const last = parsed[parsed.length - 1];
+  if (!first || !last) {
+    return false;
+  }
+
+  const yearSpread = Math.abs(first.getUTCFullYear() - last.getUTCFullYear());
+  const daySpread = Math.abs(last.getTime() - first.getTime()) / (24 * 60 * 60 * 1000);
+
+  return yearSpread <= maxYearSpread || daySpread <= maxDaySpread;
+}
+
 function splitCountrySuffix(value: string): { name: string; country: string | null } {
   const match = value.match(/\(([^)]+)\)\s*$/);
   if (!match?.[1]) {
@@ -744,7 +773,13 @@ function autoConsolidateTTBLStableHints(
       continue;
     }
 
-    const dobValues = [...new Set(rows.map((row) => row.dobIso ?? null).filter(Boolean))];
+    const dobValues = [
+      ...new Set(
+        rows
+          .map((row) => row.dobIso ?? null)
+          .filter((value): value is string => Boolean(value)),
+      ),
+    ];
     const countryValues = [
       ...new Set(rows.map((row) => row.country ?? null).filter(Boolean)),
     ];
@@ -760,6 +795,12 @@ function autoConsolidateTTBLStableHints(
 
     const maxRowsPerStable = Math.max(...[...rowsByStable.values()]);
     const canMergeByDob = dobValues.length === 1;
+    const canMergeByNearDob =
+      dobValues.length > 1 &&
+      countryValues.length <= 1 &&
+      clubValues.length <= 1 &&
+      areDobValuesNear(dobValues, 1, 400) &&
+      (maxRowsPerStable > 1 || seasonValues.length <= 1);
     const canMergeByNameCountryOnly =
       dobValues.length === 0 &&
       countryValues.length <= 1 &&
@@ -769,7 +810,11 @@ function autoConsolidateTTBLStableHints(
       countryValues.length <= 1 &&
       clubValues.length === 1 &&
       seasonValues.length <= 1;
-    const canMerge = canMergeByDob || canMergeByNameCountryOnly || canMergeByProfileFingerprint;
+    const canMerge =
+      canMergeByDob ||
+      canMergeByNearDob ||
+      canMergeByNameCountryOnly ||
+      canMergeByProfileFingerprint;
 
     if (!canMerge) {
       const leftStable = stableKeys[0] ?? "ttbl:unknown";
@@ -1370,6 +1415,56 @@ async function loadManualConfig(): Promise<PlayerRegistryManualConfig> {
   };
 }
 
+function resolveManualAliasChain(
+  key: string,
+  aliases: Record<string, string>,
+): string | null {
+  const seed = key.trim();
+  if (!seed) {
+    return null;
+  }
+
+  let current = seed;
+  let moved = false;
+  const visited = new Set<string>();
+
+  for (let depth = 0; depth < 20; depth += 1) {
+    const next = aliases[current]?.trim() ?? "";
+    if (!next) {
+      return moved ? current : null;
+    }
+    if (next === current) {
+      return current;
+    }
+    if (visited.has(next)) {
+      return current;
+    }
+
+    visited.add(next);
+    current = next;
+    moved = true;
+  }
+
+  return current;
+}
+
+function resolveManualCanonicalKey(
+  aliases: Record<string, string>,
+  sourceKey: string,
+  aliasKeyByName: string,
+  canonicalHint: string | undefined,
+): string | null {
+  const candidates = [sourceKey, aliasKeyByName, canonicalHint ?? ""].filter(Boolean);
+  for (const key of candidates) {
+    const resolved = resolveManualAliasChain(key, aliases);
+    if (resolved) {
+      return resolved;
+    }
+  }
+
+  return null;
+}
+
 function givenNamesSimilar(left: string, right: string): boolean {
   if (!left || !right) {
     return false;
@@ -1622,8 +1717,12 @@ export async function rebuildPlayerRegistry(
     const sourceKey = `${player.source}:${player.sourceId}`;
     const aliasKeyByName = `name:${player.normalizedName}`;
 
-    const manualCanonicalKey =
-      manual.aliases[sourceKey] ?? manual.aliases[aliasKeyByName] ?? null;
+    const manualCanonicalKey = resolveManualCanonicalKey(
+      manual.aliases,
+      sourceKey,
+      aliasKeyByName,
+      player.canonicalHint,
+    );
     const canonicalKey = manualCanonicalKey ?? player.canonicalHint ?? sourceKey;
 
     sourceIndex[sourceKey] = canonicalKey;

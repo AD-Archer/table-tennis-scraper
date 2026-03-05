@@ -17,6 +17,17 @@ enum SyncActivityLevel {
   error
 }
 
+enum AdminErrorCategory {
+  scrape
+  merge
+  system
+}
+
+enum AdminErrorStatus {
+  open
+  resolved
+}
+
 model SyncActivity {
   id         String             @id @default(cuid())
   occurredAt DateTime           @default(now())
@@ -28,6 +39,29 @@ model SyncActivity {
 
   @@index([occurredAt])
   @@index([source, occurredAt])
+}
+
+model AdminErrorLog {
+  id             String             @id @default(cuid())
+  occurredAt     DateTime           @default(now())
+  category       AdminErrorCategory
+  source         String
+  operation      String
+  jobId          String?
+  jobType        String?
+  message        String
+  errorName      String?
+  errorStack     String?
+  details        String?
+  status         AdminErrorStatus   @default(open)
+  resolutionNote String?
+  resolvedAt     DateTime?
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+
+  @@index([occurredAt])
+  @@index([category, status, occurredAt])
+  @@index([jobId])
 }
 
 model TtblSeasonSummary {

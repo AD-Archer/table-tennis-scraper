@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
+import { logAdminError } from "@/lib/admin/error-log";
 import { getPrismaClient } from "@/lib/db/prisma";
 import { removeDir, sleep } from "@/lib/fs";
 import { DATA_ROOT } from "@/lib/paths";
 import { rebuildPlayerRegistry } from "@/lib/players/registry";
+import { logServerEvent } from "@/lib/server/logger";
 import {
   appendSyncActivity,
   listSyncActivityEntries,
@@ -184,7 +186,17 @@ class ActionJobCancelledError extends Error {
 
 const globalStore = globalThis as typeof globalThis & {
   __actionJobs?: JobsStore;
+  __actionJobLogBroadcaster?: (
+    source: string,
+    level: string,
+    message: string,
+    data?: unknown,
+  ) => void;
 };
+
+function getLogBroadcaster() {
+  return globalStore.__actionJobLogBroadcaster ?? null;
+}
 
 function getStore(): JobsStore {
   if (!globalStore.__actionJobs) {
@@ -234,7 +246,10 @@ function getStore(): JobsStore {
   }
 
   if (!globalStore.__actionJobs.cancelControllers) {
-    globalStore.__actionJobs.cancelControllers = new Map<string, AbortController>();
+    globalStore.__actionJobs.cancelControllers = new Map<
+      string,
+      AbortController
+    >();
   }
 
   if (!globalStore.__actionJobs.ttblFollowup) {
@@ -292,8 +307,68 @@ function appendLog(status: ActionJobStatus, message: string): void {
   status.updatedAt = nowIso();
 }
 
-function emit(status: ActionJobStatus, source: "API" | "SYSTEM", message: string): void {
-  appendLog(status, `[${nowIso()}] [${source}] ${message}`);
+function emit(
+  status: ActionJobStatus,
+  source: "API" | "SYSTEM",
+  message: string,
+): void {
+  const fullMessage = `[${nowIso()}] [${source}] ${message}`;
+  appendLog(status, fullMessage);
+
+  // Broadcast to live logs stream if available
+  const broadcaster = getLogBroadcaster();
+  if (broadcaster) {
+    broadcaster(status.type, "info", message);
+  }
+}
+
+function getActionJobErrorCategory(
+  type: ActionJobType,
+): "scrape" | "merge" | "system" {
+  if (type === "players-registry") {
+    return "merge";
+  }
+  if (type === "destroy-data") {
+    return "system";
+  }
+
+  return "scrape";
+}
+
+function getActionJobErrorSource(type: ActionJobType): string {
+  if (type.startsWith("ttbl")) {
+    return "ttbl";
+  }
+  if (type.startsWith("wtt")) {
+    return "wtt";
+  }
+  if (type === "players-registry") {
+    return "players-registry";
+  }
+
+  return "system";
+}
+
+function getActionOperationLabel(type: ActionJobType): string {
+  if (type === "ttbl") {
+    return "ttbl-scrape";
+  }
+  if (type === "ttbl-legacy") {
+    return "ttbl-legacy-scrape";
+  }
+  if (type === "ttbl-all-time") {
+    return "ttbl-all-time-scrape";
+  }
+  if (type === "wtt") {
+    return "wtt-scrape";
+  }
+  if (type === "wtt-all-time") {
+    return "wtt-all-time-scrape";
+  }
+  if (type === "players-registry") {
+    return "players-registry-rebuild";
+  }
+  return "destroy-data";
 }
 
 function markStaleActiveJobs(): void {
@@ -319,7 +394,7 @@ function markStaleActiveJobs(): void {
   }
 }
 
-function getActiveActionJobs(type?: ActionJobType): ActionJobStatus[] {
+export function getActiveActionJobs(type?: ActionJobType): ActionJobStatus[] {
   markStaleActiveJobs();
   return [...getStore().jobs.values()]
     .filter((job) => (type ? job.type === type : true))
@@ -333,7 +408,9 @@ function getActiveActionJob(type?: ActionJobType): ActionJobStatus | null {
 }
 
 function getRunningActionJob(type?: ActionJobType): ActionJobStatus | null {
-  const rows = getActiveActionJobs(type).filter((job) => job.state === "running");
+  const rows = getActiveActionJobs(type).filter(
+    (job) => job.state === "running",
+  );
   return rows[0] ?? null;
 }
 
@@ -341,11 +418,24 @@ export function getActionJob(jobId: string): ActionJobStatus | null {
   return getStore().jobs.get(jobId) ?? null;
 }
 
-export function getLatestActionJob(type: ActionJobType): ActionJobStatus | null {
+export function getLatestActionJob(
+  type: ActionJobType,
+): ActionJobStatus | null {
   const rows = [...getStore().jobs.values()]
     .filter((job) => job.type === type)
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   return rows[0] ?? null;
+}
+
+export function setActionJobLogBroadcaster(
+  broadcaster: (
+    source: string,
+    level: string,
+    message: string,
+    data?: unknown,
+  ) => void,
+): void {
+  globalStore.__actionJobLogBroadcaster = broadcaster;
 }
 
 function getCancellationReason(jobId: string): string | null {
@@ -396,7 +486,10 @@ function normalizeWTTFollowupOptions(
   options: StartWTTActionJobOptions,
 ): StartWTTActionJobOptions {
   return {
-    years: options.years && options.years.length > 0 ? [...new Set(options.years)] : undefined,
+    years:
+      options.years && options.years.length > 0
+        ? [...new Set(options.years)]
+        : undefined,
     pageSize: options.pageSize ?? 50,
     maxPages: options.maxPages ?? 80,
     maxEventsPerYear: options.maxEventsPerYear ?? 16,
@@ -448,12 +541,17 @@ async function triggerScheduledTTBLFollowup(): Promise<void> {
         delayMs: retryDelay,
         reason: "retry-after-active-job",
       });
-      await appendSyncActivity("ttbl", "Background follow-up delayed (another job is active).", {
-        mode: "ttbl-followup-busy",
-        activeJobId: status.jobId,
-        activeJobType: status.type,
-        retryDelayMs: retryDelay,
-      }, "warn");
+      await appendSyncActivity(
+        "ttbl",
+        "Background follow-up delayed (another job is active).",
+        {
+          mode: "ttbl-followup-busy",
+          activeJobId: status.jobId,
+          activeJobType: status.type,
+          retryDelayMs: retryDelay,
+        },
+        "warn",
+      );
       return;
     }
 
@@ -522,12 +620,17 @@ async function triggerScheduledWTTFollowup(): Promise<void> {
         delayMs: retryDelay,
         reason: "retry-after-active-job",
       });
-      await appendSyncActivity("wtt", "Background follow-up delayed (another job is active).", {
-        mode: "wtt-followup-busy",
-        activeJobId: status.jobId,
-        activeJobType: status.type,
-        retryDelayMs: retryDelay,
-      }, "warn");
+      await appendSyncActivity(
+        "wtt",
+        "Background follow-up delayed (another job is active).",
+        {
+          mode: "wtt-followup-busy",
+          activeJobId: status.jobId,
+          activeJobType: status.type,
+          retryDelayMs: retryDelay,
+        },
+        "warn",
+      );
       return;
     }
 
@@ -699,7 +802,11 @@ export function scheduleWTTFollowupInBackground(
 
 export function cancelScheduledFollowups(
   target: "ttbl" | "wtt" | "all" = "all",
-): { ttbl: TTBLFollowupStatus; wtt: WTTFollowupStatus; cancelledTimers: number } {
+): {
+  ttbl: TTBLFollowupStatus;
+  wtt: WTTFollowupStatus;
+  cancelledTimers: number;
+} {
   const store = getStore();
   let cancelledTimers = 0;
 
@@ -739,7 +846,11 @@ export function cancelScheduledFollowups(
 export function cancelActionJob(
   jobId: string,
   reason = "Cancelled by user request.",
-): { found: boolean; alreadyTerminal: boolean; status: ActionJobStatus | null } {
+): {
+  found: boolean;
+  alreadyTerminal: boolean;
+  status: ActionJobStatus | null;
+} {
   const status = getActionJob(jobId);
   if (!status) {
     return {
@@ -785,7 +896,11 @@ export function cancelActiveActionJobs(options?: {
   includeQueued?: boolean;
   reason?: string;
 }): {
-  cancelled: Array<{ jobId: string; type: ActionJobType; state: ActionJobState }>;
+  cancelled: Array<{
+    jobId: string;
+    type: ActionJobType;
+    state: ActionJobState;
+  }>;
   count: number;
 } {
   const includeQueued = options?.includeQueued ?? true;
@@ -794,7 +909,11 @@ export function cancelActiveActionJobs(options?: {
     includeQueued ? true : job.state === "running",
   );
 
-  const cancelled: Array<{ jobId: string; type: ActionJobType; state: ActionJobState }> = [];
+  const cancelled: Array<{
+    jobId: string;
+    type: ActionJobType;
+    state: ActionJobState;
+  }> = [];
   for (const row of active) {
     const result = cancelActionJob(row.jobId, reason);
     if (!result.found || !result.status) {
@@ -822,6 +941,17 @@ async function runActionJob<T extends ActionJobType>(
   status.startedAt = nowIso();
   status.updatedAt = status.startedAt;
   emit(status, "SYSTEM", `Job started for action type=${status.type}.`);
+  logServerEvent({
+    level: "info",
+    scope: "action-job",
+    event: "job_started",
+    message: `Job started for action type=${status.type}.`,
+    context: {
+      jobId: status.jobId,
+      jobType: status.type,
+      state: status.state,
+    },
+  });
 
   try {
     throwIfJobCancelled(status);
@@ -855,14 +985,21 @@ async function runActionJob<T extends ActionJobType>(
       });
       throwIfJobCancelled(status);
       emit(status, "API", "Rebuilding player registry after TTBL scrape.");
-      const players = await rebuildPlayerRegistry((message) => appendWorkerLog(status, message));
+      const players = await rebuildPlayerRegistry((message) =>
+        appendWorkerLog(status, message),
+      );
       let followup: TTBLFollowupStatus | null = null;
-      const needsFollowup = (result.ongoingMatches ?? 0) > 0 || (result.notFinishedMatches ?? 0) > 0;
+      const needsFollowup =
+        (result.ongoingMatches ?? 0) > 0 ||
+        (result.notFinishedMatches ?? 0) > 0;
       if (needsFollowup) {
         followup = scheduleTTBLFollowupInBackground({
           season: result.metadata.season,
           numGamedays: opts.numGamedays,
-          delayMs: parseDelayEnv("TTBL_FOLLOWUP_DELAY_MS", TTBL_FOLLOWUP_DEFAULT_DELAY_MS),
+          delayMs: parseDelayEnv(
+            "TTBL_FOLLOWUP_DELAY_MS",
+            TTBL_FOLLOWUP_DEFAULT_DELAY_MS,
+          ),
           includeYouth: opts.includeYouth ?? false,
           backgroundReason: "auto-after-ttbl-job",
           reason: "auto-after-ttbl-job",
@@ -891,16 +1028,20 @@ async function runActionJob<T extends ActionJobType>(
     } else if (status.type === "ttbl-legacy") {
       const opts = options as ActionJobOptionsByType["ttbl-legacy"];
       if (opts.backgroundReason) {
-        await appendSyncActivity("ttbl", "Background TTBL legacy sync started.", {
-          mode: "ttbl-legacy-background-start",
-          jobId: status.jobId,
-          reason: opts.backgroundReason,
-          sourceJobId: opts.backgroundSourceJobId ?? null,
-          checks: {
-            seasons: opts.seasons,
-            includeYouth: opts.includeYouth ?? false,
+        await appendSyncActivity(
+          "ttbl",
+          "Background TTBL legacy sync started.",
+          {
+            mode: "ttbl-legacy-background-start",
+            jobId: status.jobId,
+            reason: opts.backgroundReason,
+            sourceJobId: opts.backgroundSourceJobId ?? null,
+            checks: {
+              seasons: opts.seasons,
+              includeYouth: opts.includeYouth ?? false,
+            },
           },
-        });
+        );
       }
       emit(
         status,
@@ -917,16 +1058,25 @@ async function runActionJob<T extends ActionJobType>(
       });
       throwIfJobCancelled(status);
       emit(status, "API", "Rebuilding player registry after TTBL scrape.");
-      const players = await rebuildPlayerRegistry((message) => appendWorkerLog(status, message));
-      const latest = [...result.results].sort(
-        (a, b) => b.metadata.season.localeCompare(a.metadata.season),
+      const players = await rebuildPlayerRegistry((message) =>
+        appendWorkerLog(status, message),
+      );
+      const latest = [...result.results].sort((a, b) =>
+        b.metadata.season.localeCompare(a.metadata.season),
       )[0];
       let followup: TTBLFollowupStatus | null = null;
-      if (latest && ((latest.ongoingMatches ?? 0) > 0 || (latest.notFinishedMatches ?? 0) > 0)) {
+      if (
+        latest &&
+        ((latest.ongoingMatches ?? 0) > 0 ||
+          (latest.notFinishedMatches ?? 0) > 0)
+      ) {
         followup = scheduleTTBLFollowupInBackground({
           season: latest.metadata.season,
           numGamedays: opts.numGamedays,
-          delayMs: parseDelayEnv("TTBL_FOLLOWUP_DELAY_MS", TTBL_FOLLOWUP_DEFAULT_DELAY_MS),
+          delayMs: parseDelayEnv(
+            "TTBL_FOLLOWUP_DELAY_MS",
+            TTBL_FOLLOWUP_DEFAULT_DELAY_MS,
+          ),
           includeYouth: opts.includeYouth ?? false,
           backgroundReason: "auto-after-ttbl-legacy-job",
           reason: "auto-after-ttbl-legacy-job",
@@ -939,33 +1089,41 @@ async function runActionJob<T extends ActionJobType>(
         );
       }
       if (opts.backgroundReason) {
-        await appendSyncActivity("ttbl", "Background TTBL legacy sync completed.", {
-          mode: "ttbl-legacy-background-complete",
-          jobId: status.jobId,
-          reason: opts.backgroundReason,
-          summary: {
-            seasons: result.seasons.length,
-            latestSeason: latest?.metadata.season ?? null,
-            latestOngoing: latest?.ongoingMatches ?? 0,
-            latestNotFinished: latest?.notFinishedMatches ?? 0,
+        await appendSyncActivity(
+          "ttbl",
+          "Background TTBL legacy sync completed.",
+          {
+            mode: "ttbl-legacy-background-complete",
+            jobId: status.jobId,
+            reason: opts.backgroundReason,
+            summary: {
+              seasons: result.seasons.length,
+              latestSeason: latest?.metadata.season ?? null,
+              latestOngoing: latest?.ongoingMatches ?? 0,
+              latestNotFinished: latest?.notFinishedMatches ?? 0,
+            },
           },
-        });
+        );
       }
       status.result = { result, players, followup };
     } else if (status.type === "ttbl-all-time") {
       const opts = options as ActionJobOptionsByType["ttbl-all-time"];
       if (opts.backgroundReason) {
-        await appendSyncActivity("ttbl", "Background TTBL all-time sync started.", {
-          mode: "ttbl-all-time-background-start",
-          jobId: status.jobId,
-          reason: opts.backgroundReason,
-          sourceJobId: opts.backgroundSourceJobId ?? null,
-          checks: {
-            startYear: opts.startYear ?? null,
-            endYear: opts.endYear ?? null,
-            includeYouth: opts.includeYouth ?? false,
+        await appendSyncActivity(
+          "ttbl",
+          "Background TTBL all-time sync started.",
+          {
+            mode: "ttbl-all-time-background-start",
+            jobId: status.jobId,
+            reason: opts.backgroundReason,
+            sourceJobId: opts.backgroundSourceJobId ?? null,
+            checks: {
+              startYear: opts.startYear ?? null,
+              endYear: opts.endYear ?? null,
+              includeYouth: opts.includeYouth ?? false,
+            },
           },
-        });
+        );
       }
       emit(
         status,
@@ -982,8 +1140,14 @@ async function runActionJob<T extends ActionJobType>(
         signal: jobSignal,
       });
       throwIfJobCancelled(status);
-      emit(status, "API", "Rebuilding player registry after TTBL all-time scrape.");
-      const players = await rebuildPlayerRegistry((message) => appendWorkerLog(status, message));
+      emit(
+        status,
+        "API",
+        "Rebuilding player registry after TTBL all-time scrape.",
+      );
+      const players = await rebuildPlayerRegistry((message) =>
+        appendWorkerLog(status, message),
+      );
       let followup: TTBLFollowupStatus | null = null;
       if (
         result.current &&
@@ -993,7 +1157,10 @@ async function runActionJob<T extends ActionJobType>(
         followup = scheduleTTBLFollowupInBackground({
           season: result.current.metadata.season,
           numGamedays: opts.numGamedays,
-          delayMs: parseDelayEnv("TTBL_FOLLOWUP_DELAY_MS", TTBL_FOLLOWUP_DEFAULT_DELAY_MS),
+          delayMs: parseDelayEnv(
+            "TTBL_FOLLOWUP_DELAY_MS",
+            TTBL_FOLLOWUP_DEFAULT_DELAY_MS,
+          ),
           includeYouth: opts.includeYouth ?? false,
           backgroundReason: "auto-after-ttbl-all-time-job",
           reason: "auto-after-ttbl-all-time-job",
@@ -1006,17 +1173,21 @@ async function runActionJob<T extends ActionJobType>(
         );
       }
       if (opts.backgroundReason) {
-        await appendSyncActivity("ttbl", "Background TTBL all-time sync completed.", {
-          mode: "ttbl-all-time-background-complete",
-          jobId: status.jobId,
-          reason: opts.backgroundReason,
-          summary: {
-            discoveredSeasons: result.discoveredSeasons.length,
-            currentSeason: result.current?.metadata.season ?? null,
-            currentOngoing: result.current?.ongoingMatches ?? 0,
-            currentNotFinished: result.current?.notFinishedMatches ?? 0,
+        await appendSyncActivity(
+          "ttbl",
+          "Background TTBL all-time sync completed.",
+          {
+            mode: "ttbl-all-time-background-complete",
+            jobId: status.jobId,
+            reason: opts.backgroundReason,
+            summary: {
+              discoveredSeasons: result.discoveredSeasons.length,
+              currentSeason: result.current?.metadata.season ?? null,
+              currentOngoing: result.current?.ongoingMatches ?? 0,
+              currentNotFinished: result.current?.notFinishedMatches ?? 0,
+            },
           },
-        });
+        );
       }
       status.result = { result, players, followup };
     } else if (status.type === "wtt") {
@@ -1053,18 +1224,29 @@ async function runActionJob<T extends ActionJobType>(
       });
       throwIfJobCancelled(status);
       emit(status, "API", "Rebuilding player registry after WTT scrape.");
-      const players = await rebuildPlayerRegistry((message) => appendWorkerLog(status, message));
+      const players = await rebuildPlayerRegistry((message) =>
+        appendWorkerLog(status, message),
+      );
       let followup: WTTFollowupStatus | null = null;
-      const needsFollowup = (result.ongoingMatches ?? 0) > 0 || (result.notFinishedMatches ?? 0) > 0;
+      const needsFollowup =
+        (result.ongoingMatches ?? 0) > 0 ||
+        (result.notFinishedMatches ?? 0) > 0;
       if (needsFollowup) {
         const followupYears =
-          result.years.length > 0 ? result.years : opts.years && opts.years.length > 0 ? opts.years : undefined;
+          result.years.length > 0
+            ? result.years
+            : opts.years && opts.years.length > 0
+              ? opts.years
+              : undefined;
         followup = scheduleWTTFollowupInBackground({
           years: followupYears,
           pageSize: opts.pageSize ?? 50,
           maxPages: Math.min(opts.maxPages ?? 180, 80),
           maxEventsPerYear: Math.min(opts.maxEventsPerYear ?? 16, 16),
-          delayMs: parseDelayEnv("WTT_FOLLOWUP_DELAY_MS", WTT_FOLLOWUP_DEFAULT_DELAY_MS),
+          delayMs: parseDelayEnv(
+            "WTT_FOLLOWUP_DELAY_MS",
+            WTT_FOLLOWUP_DEFAULT_DELAY_MS,
+          ),
           eventScope: opts.eventScope ?? "singles_only",
           includeYouth: opts.includeYouth ?? true,
           backgroundReason: "auto-after-wtt-job",
@@ -1097,18 +1279,22 @@ async function runActionJob<T extends ActionJobType>(
     } else if (status.type === "wtt-all-time") {
       const opts = options as ActionJobOptionsByType["wtt-all-time"];
       if (opts.backgroundReason) {
-        await appendSyncActivity("wtt", "Background WTT all-time sync started.", {
-          mode: "wtt-all-time-background-start",
-          jobId: status.jobId,
-          reason: opts.backgroundReason,
-          sourceJobId: opts.backgroundSourceJobId ?? null,
-          checks: {
-            startYear: opts.startYear ?? null,
-            endYear: opts.endYear ?? null,
-            maxEventsPerYear: opts.maxEventsPerYear ?? null,
-            includeYouth: opts.includeYouth ?? false,
+        await appendSyncActivity(
+          "wtt",
+          "Background WTT all-time sync started.",
+          {
+            mode: "wtt-all-time-background-start",
+            jobId: status.jobId,
+            reason: opts.backgroundReason,
+            sourceJobId: opts.backgroundSourceJobId ?? null,
+            checks: {
+              startYear: opts.startYear ?? null,
+              endYear: opts.endYear ?? null,
+              maxEventsPerYear: opts.maxEventsPerYear ?? null,
+              includeYouth: opts.includeYouth ?? false,
+            },
           },
-        });
+        );
       }
       emit(
         status,
@@ -1129,19 +1315,32 @@ async function runActionJob<T extends ActionJobType>(
         onLog: (message) => appendWorkerLog(status, message),
       });
       throwIfJobCancelled(status);
-      emit(status, "API", "Rebuilding player registry after WTT all-time scrape.");
-      const players = await rebuildPlayerRegistry((message) => appendWorkerLog(status, message));
+      emit(
+        status,
+        "API",
+        "Rebuilding player registry after WTT all-time scrape.",
+      );
+      const players = await rebuildPlayerRegistry((message) =>
+        appendWorkerLog(status, message),
+      );
       let followup: WTTFollowupStatus | null = null;
       const scrape = result.scrape;
-      const needsFollowup = (scrape.ongoingMatches ?? 0) > 0 || (scrape.notFinishedMatches ?? 0) > 0;
+      const needsFollowup =
+        (scrape.ongoingMatches ?? 0) > 0 ||
+        (scrape.notFinishedMatches ?? 0) > 0;
       if (needsFollowup) {
         const latestYear = [...scrape.years].sort((a, b) => b - a)[0];
         followup = scheduleWTTFollowupInBackground({
-          years: Number.isFinite(latestYear) ? [latestYear as number] : undefined,
+          years: Number.isFinite(latestYear)
+            ? [latestYear as number]
+            : undefined,
           pageSize: opts.pageSize ?? 50,
           maxPages: Math.min(opts.maxPages ?? 180, 80),
           maxEventsPerYear: Math.min(opts.maxEventsPerYear ?? 16, 16),
-          delayMs: parseDelayEnv("WTT_FOLLOWUP_DELAY_MS", WTT_FOLLOWUP_DEFAULT_DELAY_MS),
+          delayMs: parseDelayEnv(
+            "WTT_FOLLOWUP_DELAY_MS",
+            WTT_FOLLOWUP_DEFAULT_DELAY_MS,
+          ),
           eventScope: opts.eventScope ?? "singles_only",
           includeYouth: opts.includeYouth ?? true,
           backgroundReason: "auto-after-wtt-all-time-job",
@@ -1157,17 +1356,21 @@ async function runActionJob<T extends ActionJobType>(
         );
       }
       if (opts.backgroundReason) {
-        await appendSyncActivity("wtt", "Background WTT all-time sync completed.", {
-          mode: "wtt-all-time-background-complete",
-          jobId: status.jobId,
-          reason: opts.backgroundReason,
-          summary: {
-            discoveredYears: result.discoveredYears.length,
-            matches: scrape.matches,
-            ongoingMatches: scrape.ongoingMatches,
-            notFinishedMatches: scrape.notFinishedMatches,
+        await appendSyncActivity(
+          "wtt",
+          "Background WTT all-time sync completed.",
+          {
+            mode: "wtt-all-time-background-complete",
+            jobId: status.jobId,
+            reason: opts.backgroundReason,
+            summary: {
+              discoveredYears: result.discoveredYears.length,
+              matches: scrape.matches,
+              ongoingMatches: scrape.ongoingMatches,
+              notFinishedMatches: scrape.notFinishedMatches,
+            },
           },
-        });
+        );
       }
       status.result = { result, players, followup };
     } else if (status.type === "players-registry") {
@@ -1229,17 +1432,40 @@ async function runActionJob<T extends ActionJobType>(
     status.finishedAt = nowIso();
     status.updatedAt = status.finishedAt;
     emit(status, "SYSTEM", "Job completed successfully.");
+    logServerEvent({
+      level: "info",
+      scope: "action-job",
+      event: "job_completed",
+      message: "Job completed successfully.",
+      context: {
+        jobId: status.jobId,
+        jobType: status.type,
+        startedAt: status.startedAt,
+        finishedAt: status.finishedAt,
+      },
+    });
   } catch (error) {
     status.state = "failed";
-    const cancelled = error instanceof ActionJobCancelledError || Boolean(getCancellationReason(status.jobId));
+    const cancelled =
+      error instanceof ActionJobCancelledError ||
+      Boolean(getCancellationReason(status.jobId));
     status.error = error instanceof Error ? error.message : "unknown error";
     status.finishedAt = nowIso();
     status.updatedAt = status.finishedAt;
-    emit(status, "SYSTEM", cancelled ? `Job cancelled: ${status.error}` : `Job failed: ${status.error}`);
-    const backgroundReason = (options as { backgroundReason?: string }).backgroundReason;
+    emit(
+      status,
+      "SYSTEM",
+      cancelled
+        ? `Job cancelled: ${status.error}`
+        : `Job failed: ${status.error}`,
+    );
+    const backgroundReason = (options as { backgroundReason?: string })
+      .backgroundReason;
     if (backgroundReason && !cancelled) {
       const source: "ttbl" | "wtt" =
-        status.type === "ttbl" || status.type === "ttbl-legacy" || status.type === "ttbl-all-time"
+        status.type === "ttbl" ||
+        status.type === "ttbl-legacy" ||
+        status.type === "ttbl-all-time"
           ? "ttbl"
           : "wtt";
       await appendSyncActivity(
@@ -1254,6 +1480,38 @@ async function runActionJob<T extends ActionJobType>(
         "error",
       );
     }
+    if (!cancelled) {
+      await logAdminError({
+        category: getActionJobErrorCategory(status.type),
+        source: getActionJobErrorSource(status.type),
+        operation: getActionOperationLabel(status.type),
+        jobId: status.jobId,
+        jobType: status.type,
+        message: status.error ?? "unknown error",
+        error,
+        details: {
+          startedAt: status.startedAt,
+          finishedAt: status.finishedAt,
+          options: options as Record<string, unknown>,
+          logsTail: status.logs.slice(-100),
+        },
+      }).catch(() => undefined);
+    }
+    logServerEvent({
+      level: cancelled ? "warn" : "error",
+      scope: "action-job",
+      event: cancelled ? "job_cancelled" : "job_failed",
+      message: cancelled
+        ? `Job cancelled for action type=${status.type}.`
+        : `Job failed for action type=${status.type}.`,
+      context: {
+        jobId: status.jobId,
+        jobType: status.type,
+        cancelled,
+        error: status.error,
+      },
+      error,
+    });
   } finally {
     const store = getStore();
     store.cancelControllers.delete(status.jobId);
@@ -1313,11 +1571,33 @@ export function startActionJob<T extends ActionJobType>(
 ): { alreadyRunning: boolean; status: ActionJobStatus } {
   const activeSameType = getActiveActionJob(type);
   if (activeSameType && activeSameType.state === "running") {
+    logServerEvent({
+      level: "info",
+      scope: "action-job",
+      event: "joined_running_job_same_type",
+      message: `Joined running job for action type=${type}.`,
+      context: {
+        requestedType: type,
+        runningJobId: activeSameType.jobId,
+        runningJobType: activeSameType.type,
+      },
+    });
     return { alreadyRunning: true, status: activeSameType };
   }
 
   const runningAnyType = getRunningActionJob();
   if (runningAnyType && type !== "destroy-data") {
+    logServerEvent({
+      level: "info",
+      scope: "action-job",
+      event: "blocked_by_running_job",
+      message: `Action type=${type} blocked by running job ${runningAnyType.type}.`,
+      context: {
+        requestedType: type,
+        runningJobId: runningAnyType.jobId,
+        runningJobType: runningAnyType.type,
+      },
+    });
     return { alreadyRunning: true, status: runningAnyType };
   }
 
@@ -1339,9 +1619,22 @@ export function startActionJob<T extends ActionJobType>(
   store.jobs.set(status.jobId, status);
   store.cancelControllers.set(status.jobId, new AbortController());
   store.cancelReasons.delete(status.jobId);
+  logServerEvent({
+    level: "info",
+    scope: "action-job",
+    event: "job_queued",
+    message: `Job queued for action type=${type}.`,
+    context: {
+      jobId: status.jobId,
+      jobType: status.type,
+    },
+  });
 
   if (type === "destroy-data") {
-    void runDestroyWhenIdle(status, options as ActionJobOptionsByType["destroy-data"]);
+    void runDestroyWhenIdle(
+      status,
+      options as ActionJobOptionsByType["destroy-data"],
+    );
   } else {
     void runActionJob(status, options);
   }

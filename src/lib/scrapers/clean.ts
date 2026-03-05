@@ -169,7 +169,7 @@ export async function runCleanScrape(
   }
 
   emit(onLog, "Rebuilding player merge registry...");
-  const registry = await rebuildPlayerRegistry();
+  const registry = await rebuildPlayerRegistry((message) => emit(onLog, message));
   emit(
     onLog,
     `Player registry built. Canonical=${registry.totals.canonicalPlayers}, merged=${registry.totals.mergedPlayers}.`,

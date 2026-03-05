@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { logAdminError } from "@/lib/admin/error-log";
+import { logServerEvent } from "@/lib/server/logger";
 import {
   CleanScrapeOptions,
   CleanScrapeResult,
@@ -81,6 +83,16 @@ export function startCleanScrapeJob(options: CleanScrapeOptions): {
 } {
   const active = getActiveJob();
   if (active) {
+    logServerEvent({
+      level: "info",
+      scope: "clean-job",
+      event: "joined_running_job",
+      message: "Joined running clean scrape job.",
+      context: {
+        jobId: active.jobId,
+        state: active.state,
+      },
+    });
     return {
       alreadyRunning: true,
       status: active,
@@ -104,12 +116,30 @@ export function startCleanScrapeJob(options: CleanScrapeOptions): {
 
   const store = getStore();
   store.jobs.set(status.jobId, status);
+  logServerEvent({
+    level: "info",
+    scope: "clean-job",
+    event: "job_queued",
+    message: "Clean scrape job queued.",
+    context: {
+      jobId: status.jobId,
+    },
+  });
 
   void (async () => {
     status.state = "running";
     status.startedAt = nowIso();
     status.updatedAt = status.startedAt;
     appendLog(status, `[${status.startedAt}] Job started.`);
+    logServerEvent({
+      level: "info",
+      scope: "clean-job",
+      event: "job_started",
+      message: "Clean scrape job started.",
+      context: {
+        jobId: status.jobId,
+      },
+    });
 
     try {
       const result = await runCleanScrape(options, (message) => {
@@ -121,6 +151,17 @@ export function startCleanScrapeJob(options: CleanScrapeOptions): {
       status.finishedAt = nowIso();
       status.updatedAt = status.finishedAt;
       appendLog(status, `[${status.finishedAt}] Job completed successfully.`);
+      logServerEvent({
+        level: "info",
+        scope: "clean-job",
+        event: "job_completed",
+        message: "Clean scrape job completed successfully.",
+        context: {
+          jobId: status.jobId,
+          startedAt: status.startedAt,
+          finishedAt: status.finishedAt,
+        },
+      });
     } catch (error) {
       const finishedAt = nowIso();
       status.state = "failed";
@@ -128,6 +169,32 @@ export function startCleanScrapeJob(options: CleanScrapeOptions): {
       status.finishedAt = finishedAt;
       status.updatedAt = finishedAt;
       appendLog(status, `[${finishedAt}] Job failed: ${status.error}`);
+      await logAdminError({
+        category: "scrape",
+        source: "master-sync",
+        operation: "clean-scrape",
+        jobId: status.jobId,
+        jobType: "clean-scrape",
+        message: status.error,
+        error,
+        details: {
+          startedAt: status.startedAt,
+          finishedAt: status.finishedAt,
+          options,
+          logsTail: status.logs.slice(-100),
+        },
+      }).catch(() => undefined);
+      logServerEvent({
+        level: "error",
+        scope: "clean-job",
+        event: "job_failed",
+        message: "Clean scrape job failed.",
+        context: {
+          jobId: status.jobId,
+          error: status.error,
+        },
+        error,
+      });
     }
   })();
 

@@ -10,11 +10,26 @@ Next.js port of the Python scraping workflow for:
 
 ```bash
 pnpm install
-pnpm prisma:generate
-pnpm dev
+just
+just dev
 ```
 
 Open `http://localhost:3000`.
+
+`just` recipes run `pnpm` scripts through Infisical (`infisical run -- ...`), so secrets from your Infisical project are loaded automatically.
+Make sure both CLIs are installed: `just` and `infisical` (this repo already includes `.infisical.json`).
+
+Available commands:
+
+- `just` or `just list` (list commands)
+- `just dev`
+- `just build`
+- `just start`
+- `just lint`
+- `just prisma-generate`
+- `just prisma-migrate-dev`
+- `just prisma-migrate-deploy`
+- `just prisma-studio`
 
 All scraper reads/writes are hard-locked to `data/` (the app does not read from `../TTBL` or `../ITTF`, and path env overrides are ignored).
 
@@ -24,7 +39,10 @@ Set these in `.env`:
 
 - `DATABASE_URL=postgresql://...` (required for Prisma/Postgres mode)
 - `NEXT_PUBLIC_MASTER_SYNC_PASSWORD=...` (frontend-only check for master sync and destroy-data buttons)
+- `ADMIN_CONSOLE_PASSWORD=...` (server-side password for `/console/errors` + `/api/admin/*`)
 - `DATA_STORE_MODE=postgres` (`files`, `hybrid`, or `postgres`; default is `postgres`)
+- `SERVER_LOG_LEVEL=info` (optional: `debug`, `info`, `warn`, `error`)
+- `SERVER_LOG_PRETTY=true` (optional; pretty multi-line logs in non-prod by default)
 
 You can start from `.env.example`.
 
@@ -43,9 +61,14 @@ Notes:
   - `Destroy data` hard reset button
 - Player registry + merge candidate table
 - Per-action scrape logs for TTBL/WTT/master-sync/destroy runs
+- Admin error console (`/console/errors`) for scrape/merge failure triage:
+  - persistent timestamped error records
+  - copyable full error payloads
+  - manual alias fixes for merge resolution
 - Endpoint explorer (scraper + registry endpoints)
 - Data file location cards so you can see exactly where artifacts are saved
 - Plain-language panel describing what player registry rebuild means
+- Dashboard debug hooks to simulate scrape/merge errors and validate admin tooling end-to-end
 
 ## API Endpoints (App)
 
@@ -67,6 +90,9 @@ Notes:
 - `GET /api/players/slugs`
 - `GET /api/overview`
 - `GET /api/endpoints`
+- `GET/POST/DELETE /api/admin/errors` (admin password required, triage + simulation)
+- `PATCH/DELETE /api/admin/errors/:id` (admin password required)
+- `GET/POST/DELETE /api/admin/manual-aliases` (admin password required)
 
 ## Data Artifact Keys
 
@@ -102,6 +128,10 @@ Tools include:
 - `start_wtt_scrape`
 - `start_master_scrape`
 - `get_scrape_status`
-- `list_matches` (today, ongoing, not finished, legacy, current filters)
-- `list_places`
-- `health_check`
+- `list_matches` (filters + `view`/`fields` projection controls)
+- `list_match_status` (lightweight status payload)
+- `list_match_context` (venue/event/player-focused payload)
+- `list_match_participants` (player+score payload)
+- `list_places` (filters + `view`/`fields` projection controls)
+- `list_place_activity` (today/ongoing totals payload)
+- `health_check` (samples are opt-in via `includeSamples=true`)

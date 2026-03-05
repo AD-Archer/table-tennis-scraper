@@ -3,6 +3,11 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { DashboardOverview, EndpointRow } from "@/lib/dashboard-types";
+import {
+  clearAdminConsoleToken,
+  readAdminConsoleToken,
+  writeAdminConsoleToken,
+} from "@/lib/admin/browser-token";
 
 interface DashboardProps {
   initialOverview: DashboardOverview;
@@ -178,6 +183,8 @@ export function Dashboard({ initialOverview }: DashboardProps) {
       : `${new Date().getUTCFullYear()},${new Date().getUTCFullYear() - 1}`,
   );
   const [masterPassword, setMasterPassword] = useState("");
+  const [adminConsolePassword, setAdminConsolePassword] = useState("");
+  const [adminDebugBusy, setAdminDebugBusy] = useState(false);
 
   const [showActionLog, setShowActionLog] = useState(false);
   const [actionLogTitle, setActionLogTitle] = useState("No action has been run yet.");
@@ -187,6 +194,23 @@ export function Dashboard({ initialOverview }: DashboardProps) {
   const [showCanonicalKeys, setShowCanonicalKeys] = useState(false);
 
   const actionPollTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    const saved = readAdminConsoleToken();
+    if (saved) {
+      setAdminConsolePassword(saved);
+    }
+  }, []);
+
+  useEffect(() => {
+    const trimmed = adminConsolePassword.trim();
+    if (trimmed) {
+      writeAdminConsoleToken(trimmed);
+      return;
+    }
+    clearAdminConsoleToken();
+  }, [adminConsolePassword]);
+
   const appendUiLog = useCallback((message: string): void => {
     setActionLogs((prev) => [...prev, `[${new Date().toISOString()}] [UI] ${message}`]);
   }, []);
@@ -606,6 +630,55 @@ export function Dashboard({ initialOverview }: DashboardProps) {
     );
   }
 
+  async function onSimulateAdminError(category: "scrape" | "merge") {
+    const password = adminConsolePassword.trim() || readAdminConsoleToken() || "";
+
+    setAdminDebugBusy(true);
+    appendUiLog(`Admin debug requested: simulate ${category} error.`);
+    try {
+      const headers = new Headers({ "content-type": "application/json" });
+      if (password) {
+        headers.set("x-admin-console-password", password);
+      }
+      const response = await fetch("/api/admin/errors", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          action: "simulate",
+          category,
+          source: "dashboard-debug",
+          operation: `dashboard-debug-${category}`,
+        }),
+      });
+      const payload = (await response.json().catch(() => ({}))) as {
+        ok?: boolean;
+        error?: string;
+        entry?: { id?: string };
+      };
+      if (!response.ok || payload.ok === false) {
+        throw new Error(payload.error ?? `Simulate error failed (${response.status})`);
+      }
+
+      const createdId = payload.entry?.id ?? "unknown";
+      appendUiLog(`Admin debug created ${category} error log entry ${createdId}.`);
+      setActivity(
+        `Simulated ${category} error logged (${createdId}). Open Admin Console > Errors tab to view it.`,
+      );
+      await refreshOverview();
+    } catch (error) {
+      appendUiLog(
+        `Admin debug simulate ${category} error failed: ${
+          error instanceof Error ? error.message : "unknown error"
+        }`,
+      );
+      setActivity(
+        `Admin debug failed: ${error instanceof Error ? error.message : "unknown error"}`,
+      );
+    } finally {
+      setAdminDebugBusy(false);
+    }
+  }
+
   async function onRefreshMergeRegistryStrict() {
     await invoke(
       "/api/players/registry",
@@ -882,6 +955,45 @@ export function Dashboard({ initialOverview }: DashboardProps) {
           >
             {busyKey === "Destroy data" ? "Destroying..." : "Destroy data"}
           </button>
+        </div>
+
+        <div className="panel action-panel action-panel-refresh">
+          <h2>Admin Error Debug</h2>
+          <label>
+            Admin Console Password
+            <input
+              type="password"
+              value={adminConsolePassword}
+              onChange={(e) => setAdminConsolePassword(e.target.value)}
+              placeholder="Matches server ADMIN_CONSOLE_PASSWORD"
+            />
+          </label>
+          <p className="hint">
+            Use this to create synthetic scrape/merge errors so you can validate the admin error console workflow before production failures.
+          </p>
+          <div className="inline-actions">
+            <button
+              className="btn btn-ghost btn-sm"
+              disabled={adminDebugBusy || busyKey !== null}
+              onClick={() => void onSimulateAdminError("scrape")}
+              type="button"
+            >
+              {adminDebugBusy ? "Working..." : "Simulate scrape error"}
+            </button>
+            <button
+              className="btn btn-ghost btn-sm"
+              disabled={adminDebugBusy || busyKey !== null}
+              onClick={() => void onSimulateAdminError("merge")}
+              type="button"
+            >
+              {adminDebugBusy ? "Working..." : "Simulate merge error"}
+            </button>
+          </div>
+          <p className="hint">
+            <Link className="ghost-link" href="/console/errors">
+              Open admin error console
+            </Link>
+          </p>
         </div>
       </section>
 
