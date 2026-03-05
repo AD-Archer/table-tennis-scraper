@@ -46,6 +46,7 @@ export const PLAYERS_MANUAL_FILE = path.join(PLAYERS_OUTPUT_DIR, "manual_merges"
 
 export const PIPELINE_DIR = path.join(DATA_ROOT, "pipeline");
 export const WTT_PIPELINE_STATE_FILE = path.join(PIPELINE_DIR, "wtt_state.json");
+export const TTBL_PIPELINE_STATE_FILE = path.join(PIPELINE_DIR, "ttbl_state.json");
 export const SYNC_ACTIVITY_LOG_FILE = path.join(PIPELINE_DIR, "sync_activity_log.json");
 
 export function getTTBLReadDir(): string {
