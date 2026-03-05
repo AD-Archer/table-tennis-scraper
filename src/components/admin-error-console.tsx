@@ -287,7 +287,6 @@ export function AdminErrorConsole() {
   const [showFrameworkFrames, setShowFrameworkFrames] = useState(false);
 
   const [allErrors, setAllErrors] = useState<AdminErrorEntry[]>([]);
-  const [selectedErrorId, setSelectedErrorId] = useState<string | null>(null);
   const [mergeCandidates, setMergeCandidates] = useState<MergeCandidateRow[]>([]);
   const [resolutionNotes, setResolutionNotes] = useState<Record<string, string>>({});
 
@@ -306,8 +305,8 @@ export function AdminErrorConsole() {
   const didAttemptAutoUnlock = useRef(false);
 
   const selectedError = useMemo(
-    () => allErrors.find((row) => row.id === selectedErrorId) ?? null,
-    [allErrors, selectedErrorId],
+    () => allErrors.find((row) => row.id === errorIdFromUrl) ?? null,
+    [allErrors, errorIdFromUrl],
   );
 
   const filteredErrors = useMemo(() => {
@@ -482,7 +481,7 @@ export function AdminErrorConsole() {
   function setTab(tab: AdminTab): void {
     const params = new URLSearchParams(searchParams);
     if (tab === "issue") {
-      const issueId = selectedErrorId ?? errorIdFromUrl;
+      const issueId = errorIdFromUrl;
       if (!issueId) {
         params.set("tab", "errors");
         params.delete("errorId");
@@ -546,9 +545,7 @@ export function AdminErrorConsole() {
           );
         }
       } finally {
-        if (!cancelled) {
-          setBusyKey((current) => (current === "restore" ? null : current));
-        }
+        setBusyKey((current) => (current === "restore" ? null : current));
       }
     })();
 
@@ -616,11 +613,6 @@ export function AdminErrorConsole() {
       logsViewerRef.current.scrollTop = logsViewerRef.current.scrollHeight;
     }
   }, [filteredLogs]);
-
-  // Update selected error from URL
-  useEffect(() => {
-    setSelectedErrorId(errorIdFromUrl ?? null);
-  }, [errorIdFromUrl]);
 
   // Reload active jobs periodically
   useEffect(() => {
@@ -832,7 +824,7 @@ export function AdminErrorConsole() {
           <section className="panel">
             <div className="tab-nav">
               {(
-                errorIdFromUrl || selectedErrorId
+                errorIdFromUrl
                   ? (["issue", "errors", "logs", "merge", "debug"] as const)
                   : (["errors", "logs", "merge", "debug"] as const)
               ).map((tab) => (
@@ -964,7 +956,7 @@ export function AdminErrorConsole() {
               ) : (
                 <div className="admin-section-stack">
                   <p className="hint">
-                    Issue not found for ID <code>{selectedErrorId ?? errorIdFromUrl ?? "-"}</code>.
+                    Issue not found for ID <code>{errorIdFromUrl ?? "-"}</code>.
                   </p>
                   <div className="inline-actions">
                     <button
